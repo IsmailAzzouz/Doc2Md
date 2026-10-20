@@ -8,9 +8,10 @@
    git tag -a v0.1.0 -m 'Release v0.1.0'
    git push origin v0.1.0
    ```
-5. The release workflow verifies that the tag matches the package version,
-   runs tests, builds wheel/sdist, checks metadata and publishes a GitHub
-   Release with those artifacts. Inspect the run and published release.
+5. The single release job runs in a `python:3.11-alpine` container. It verifies
+   that the tag matches the package version, runs tests, builds wheel/sdist,
+   checks metadata and publishes a GitHub Release using GitHub CLI.
+   Inspect the run and published release.
 6. If any job fails, fix the issue on a new commit and use a **new** tag; avoid
    moving or force-pushing published tags.
 
