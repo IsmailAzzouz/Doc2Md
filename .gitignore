@@ -1,0 +1,19 @@
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+.venv/
+venv/
+.env
+.env.*
+!.env.example
+build/
+dist/
+*.egg-info/
+*.egg
+.DS_Store
+Thumbs.db
+# Converter-generated artifacts (prefer explicit output directories)
+*_media/

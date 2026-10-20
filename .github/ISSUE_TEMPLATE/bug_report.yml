@@ -1,0 +1,25 @@
+name: Bug report
+description: Report a reproducible conversion bug
+labels: [bug]
+body:
+  - type: textarea
+    id: description
+    attributes:
+      label: What happened?
+      description: Describe expected and observed behavior. Do not upload confidential documents.
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Steps to reproduce
+      placeholder: Commands, minimal sanitized fixture, and relevant output
+    validations:
+      required: true
+  - type: input
+    id: environment
+    attributes:
+      label: Environment
+      placeholder: Python version, OS and optional LibreOffice version
+    validations:
+      required: true
