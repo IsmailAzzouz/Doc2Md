@@ -6,6 +6,9 @@ minor releases may change APIs.
 
 ## [Unreleased]
 
+- Fix build with recent setuptools by removing the obsolete license classifier.
+- Simplify CI and releases to one Alpine container job each; remove Dependabot automation.
+
 - Initial import of the bidirectional converters from the supplied source suite.
 - Python packaging and console scripts.
 - Automated CI, tag-based GitHub release workflow, smoke tests and governance docs.

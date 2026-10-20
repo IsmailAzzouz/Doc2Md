@@ -97,9 +97,10 @@ measure of document quality.
 
 ## Releases
 
-Pull requests run a cross-platform test matrix. Version tags (`vX.Y.Z`) run
-checks and package validation before publishing a GitHub Release with source
-and wheel artifacts. Releases are not automatically published to PyPI.
+Pull requests and pushes to `main` run one CI job in a small
+`python:3.11-alpine` container: tests, wheel/sdist build and metadata check.
+Version tags (`vX.Y.Z`) run one Alpine release job that validates and publishes
+GitHub Release artifacts. Releases are not automatically published to PyPI.
 Maintainers should follow [RELEASING.md](RELEASING.md).
 
 ## Community
