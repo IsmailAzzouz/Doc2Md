@@ -1,7 +1,6 @@
 # Doc2Md
 
-[![CI](https://github.com/IsmailAzzouz/Doc2Md/actions/workflows/ci.yml/badge.svg)](https://github.com/IsmailAzzouz/Doc2Md/actions/workflows/ci.yml)
-[![Release](https://img.shields.io/github/v/release/IsmailAzzouz/Doc2Md?display_name=tag)](https://github.com/IsmailAzzouz/Doc2Md/releases)
+[![CI (main)](https://github.com/IsmailAzzouz/Doc2Md/actions/workflows/ci.yml/badge.svg?branch=main&event=push)](https://github.com/IsmailAzzouz/Doc2Md/actions/workflows/ci.yml?query=branch%3Amain)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
 A Python toolkit for converting **Word → Markdown** and **Markdown → DOCX**. It
@@ -100,8 +99,11 @@ measure of document quality.
 Pull requests and pushes to `main` run one CI job in a small
 `python:3.11-alpine` container: tests, wheel/sdist build and metadata check.
 Version tags (`vX.Y.Z`) run one Alpine release job that validates and publishes
-GitHub Release artifacts. Releases are not automatically published to PyPI.
-Maintainers should follow [RELEASING.md](RELEASING.md).
+GitHub Release artifacts. **No GitHub Release has been published yet**; the
+`0.1.0` version in `pyproject.toml` is not a published release or tag. Until the
+first release, install from the repository source as described above. Releases
+are not automatically published to PyPI. Maintainers should follow
+[RELEASING.md](RELEASING.md) to publish a versioned tag.
 
 ## Community
 
