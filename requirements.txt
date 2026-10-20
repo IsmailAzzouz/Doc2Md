@@ -1,0 +1,5 @@
+# Runtime dependencies are declared in pyproject.toml.
+# Install in editable mode for development: python -m pip install -e ".[dev]"
+lxml>=5.0,<7
+markdown-it-py>=3.0,<5
+mdit-py-plugins>=0.4,<1
