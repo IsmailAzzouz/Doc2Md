@@ -1,132 +1,215 @@
-"""numbering.xml -> list counters and labels."""
-from .xmlns import *
+"""Resolve Word list definitions, then count each numbering instance separately.
+
+An abstract definition is a reusable template. A numId selects that template,
+applies instance-specific overrides and owns its own counters. Keeping those
+three steps separate prevents unrelated lists from sharing state.
+"""
+import re
+from dataclasses import dataclass, replace
+from typing import Optional
+
+from .xmlns import ILVL, NUMID, VAL, W
+
 
 _ROMAN = (('m', 1000), ('cm', 900), ('d', 500), ('cd', 400), ('c', 100), ('xc', 90),
           ('l', 50), ('xl', 40), ('x', 10), ('ix', 9), ('v', 5), ('iv', 4), ('i', 1))
+_NUMBER_FORMATS = {'decimal', 'decimalZero', 'upperRoman', 'lowerRoman', 'upperLetter', 'lowerLetter'}
+_LEVEL_REFERENCE = re.compile(r'%([1-9])')
 
 
-def _int(v, default):
+def _integer(value, default):
     try:
-        return int(v)
+        return int(value)
     except (TypeError, ValueError):
         return default
 
 
-def _roman(n):
-    out = []
-    for s, v in _ROMAN:
-        while n >= v:
-            out.append(s)
-            n -= v
-    return ''.join(out)
+def _value(element, name, default=None):
+    child = element.find(W + name)
+    return child.get(VAL, default) if child is not None else default
 
 
-def _letters(n):
-    return chr(ord('a') + (n - 1) % 26) * ((n - 1) // 26 + 1)
+def _enabled(element):
+    return element is not None and element.get(VAL) not in ('0', 'false', 'off')
 
 
-def format_number(fmt, n):
-    if fmt == 'decimalZero':
-        return '%02d' % n
-    if fmt == 'upperRoman':
-        return _roman(n).upper()
-    if fmt == 'lowerRoman':
-        return _roman(n)
-    if fmt == 'upperLetter':
-        return _letters(n).upper()
-    if fmt == 'lowerLetter':
-        return _letters(n)
-    return str(n)
+def format_number(number_format: str, number: int) -> str:
+    """Format supported Word counters; unknown formats fall back to decimal."""
+    if number_format == 'decimalZero':
+        return f'{number:02d}'
+    if number <= 0:
+        return str(number)
+    if number_format in ('upperRoman', 'lowerRoman'):
+        parts = []
+        for symbol, value in _ROMAN:
+            count, number = divmod(number, value)
+            parts.append(symbol * count)
+        text = ''.join(parts)
+        return text.upper() if number_format == 'upperRoman' else text
+    if number_format in ('upperLetter', 'lowerLetter'):
+        # Word repeats letters after Z: AA, BB, ... ZZ, AAA (not spreadsheet columns).
+        letter = chr(ord('a') + (number - 1) % 26)
+        text = letter * ((number - 1) // 26 + 1)
+        return text.upper() if number_format == 'upperLetter' else text
+    return str(number)
+
+
+@dataclass(frozen=True)
+class _Level:
+    number_format: str
+    text: str
+    start: int
+    restart_after: Optional[int]
+    paragraph_style: Optional[str]
+    legal: bool
+
+
+@dataclass(frozen=True)
+class ListNumber:
+    """The resolved value and visible label for one numbered paragraph."""
+
+    num_id: int
+    level: int
+    value: int
+    label: str
+    number_format: str
+    unsupported_formats: tuple[str, ...] = ()
+
+    @property
+    def is_bullet(self):
+        return self.number_format == 'bullet'
+
+    @property
+    def has_marker(self):
+        return self.number_format != 'none' and (self.is_bullet or bool(self.label))
+
+
+def _read_level(element, index):
+    # lvlRestart is one-based; omitted means the previous level, zero means never.
+    # Invalid references are ignored, so they retain the default restart rule.
+    restart = _integer(_value(element, 'lvlRestart'), index)
+    if not 0 <= restart <= index:
+        restart = index
+    text_element = element.find(W + 'lvlText')
+    text = _value(element, 'lvlText', f'%{index + 1}.')
+    if text_element is not None and text_element.get(W + 'null') in ('1', 'true', 'on'):
+        text = ''
+    return _Level(
+        number_format=_value(element, 'numFmt', 'decimal'),
+        text=text,
+        start=max(0, _integer(_value(element, 'start'), 0)),
+        restart_after=restart - 1 if restart else None,
+        paragraph_style=_value(element, 'pStyle'),
+        legal=_enabled(element.find(W + 'isLgl')),
+    )
 
 
 class Numbering:
-    def __init__(self, root):
-        self.abs, self.num, self.alias, self.style_lvl = {}, {}, {}, {}
-        self.counters, self.seen = {}, set()
+    def __init__(self, root, styles=None):
+        self._styles = styles
+        self._abstract_levels = {}
+        self._style_references = {}
+        self._style_definitions = {}
+        self._instances = {}
+        self._resolved_levels = {}
+        self._counters = {}
         if root is None:
             return
-        style_links, pending = {}, {}
-        for a in root.iterfind(W + 'abstractNum'):
-            aid = a.get(W + 'abstractNumId')
-            lvls = {}
-            for l in a.iterfind(W + 'lvl'):
-                il = _int(l.get(ILVL), 0)
-                f, t, s, p = (l.find(W + k) for k in ('numFmt', 'lvlText', 'start', 'pStyle'))
-                ps = p.get(VAL) if p is not None else None
-                pp = l.find(PPR)
-                ind = pp.find(W + 'ind') if pp is not None else None
-                left = _int(ind.get(W + 'left', ind.get(W + 'start')), None) if ind is not None else None
-                lvls[il] = ((f.get(VAL) if f is not None else None) or 'decimal',
-                            (t.get(VAL) if t is not None else None) or '%1.',
-                            _int(s.get(VAL), 1) if s is not None else 1, ps, left)
-                if ps:
-                    self.style_lvl[ps] = il
-            self.abs[aid] = lvls
-            sl = a.find(W + 'styleLink')
-            if sl is not None:
-                style_links[sl.get(VAL)] = aid
-            nl = a.find(W + 'numStyleLink')
-            if nl is not None and not lvls:
-                pending[aid] = nl.get(VAL)
-        for aid, style in pending.items():
-            if style in style_links:
-                self.alias[aid] = style_links[style]
-        for n in root.iterfind(W + 'num'):
-            a = n.find(W + 'abstractNumId')
-            if a is None:
+        for abstract in root.iterfind(W + 'abstractNum'):
+            abstract_id = abstract.get(W + 'abstractNumId')
+            levels = {}
+            for element in abstract.iterfind(W + 'lvl'):
+                index = _integer(element.get(ILVL), -1)
+                if 0 <= index <= 8:
+                    levels[index] = _read_level(element, index)
+            self._abstract_levels[abstract_id] = levels
+            style_reference = _value(abstract, 'numStyleLink')
+            if style_reference:
+                self._style_references[abstract_id] = style_reference
+            style_definition = _value(abstract, 'styleLink')
+            if style_definition:
+                self._style_definitions[style_definition] = abstract_id
+        for instance in root.iterfind(W + 'num'):
+            num_id = _integer(instance.get(NUMID), 0)
+            if num_id > 0:
+                self._instances[num_id] = instance
+
+    def _levels(self, num_id, visiting=None):
+        """Resolve a template and overrides once, without creating counter state."""
+        if num_id in self._resolved_levels:
+            return self._resolved_levels[num_id]
+        visiting = set() if visiting is None else visiting
+        instance = self._instances.get(num_id)
+        if instance is None or num_id in visiting:
+            return {}
+        visiting = visiting | {num_id}
+        abstract_id = _value(instance, 'abstractNumId')
+        levels = dict(self._abstract_levels.get(abstract_id, {}))
+        style_id = self._style_references.get(abstract_id)
+        if not levels and style_id:
+            if self._styles is not None:
+                linked_id = self._styles.para(style_id).numid
+                levels = dict(self._levels(linked_id, visiting))
+            if not levels:
+                linked_abstract = self._style_definitions.get(style_id)
+                levels = dict(self._abstract_levels.get(linked_abstract, {}))
+        for override in instance.iterfind(W + 'lvlOverride'):
+            index = _integer(override.get(ILVL), -1)
+            if not 0 <= index <= 8:
                 continue
-            ov = {}
-            for o in n.iterfind(W + 'lvlOverride'):
-                so = o.find(W + 'startOverride')
-                if so is not None:
-                    ov[_int(o.get(ILVL), 0)] = _int(so.get(VAL), 1)
-            self.num[_int(n.get(NUMID), -1)] = (a.get(VAL), ov)
+            replacement = override.find(W + 'lvl')
+            if replacement is not None:
+                # A nested lvl replaces the definition; it is not a property patch.
+                levels[index] = _read_level(replacement, index)
+            start = _integer(_value(override, 'startOverride'), None)
+            if index in levels and start is not None and start >= 0:
+                # startOverride takes precedence even over the replacement lvl's start.
+                levels[index] = replace(levels[index], start=start)
+        self._resolved_levels[num_id] = levels
+        return levels
 
-    def style_level(self, style_id):
-        return self.style_lvl.get(style_id, 0)
+    def style_level(self, style_id, num_id):
+        """Resolve paragraph-style levels within the selected numbering instance."""
+        if style_id is None:
+            return 0
+        for index, level in self._levels(num_id).items():
+            if level.paragraph_style == style_id:
+                return index
+        return 0
 
-    def step(self, numid, ilvl):
-        """Advance counters. -> (bullet, number, label, none, left_indent_twips) or None if unknown."""
-        n = self.num.get(numid)
-        if n is None:
+    def step(self, num_id: int, level_index: int) -> Optional[ListNumber]:
+        """Count one paragraph and reset only levels triggered by this level."""
+        levels = self._levels(num_id)
+        definition = levels.get(level_index)
+        if definition is None:
             return None
-        aid, ov = n
-        aid = self.alias.get(aid, aid)
-        lv = self.abs.get(aid)
-        if not lv:
-            return None
-        ilvl = max(0, min(ilvl, 8))
-        info = lv.get(ilvl) or lv[min(lv)]
-        arr = self.counters.setdefault(aid, [None] * 9)
-        if numid not in self.seen:
-            self.seen.add(numid)
-            for l in ov:
-                for j in range(l, 9):
-                    arr[j] = None
-        fmt, text, start, _, left = info
-        left = left if left is not None else (ilvl + 1) * 360
-        start = ov.get(ilvl, start)
-        arr[ilvl] = start if arr[ilvl] is None else arr[ilvl] + 1
-        for j in range(ilvl + 1, 9):
-            arr[j] = None
-        if fmt == 'bullet':
-            return True, 0, '', False, left
-        if fmt == 'none':
-            return False, 0, '', True, left
-        return False, arr[ilvl], self._label(lv, arr, text), False, left
+        counters = self._counters.setdefault(num_id, {})
+        value = counters[level_index] + 1 if level_index in counters else definition.start
+        counters[level_index] = value
+        for index, level in levels.items():
+            if level.restart_after == level_index:
+                counters.pop(index, None)
+        label, unsupported = self._label(level_index, levels, counters)
+        return ListNumber(num_id, level_index, value, label, definition.number_format, unsupported)
 
     @staticmethod
-    def _label(lv, arr, text):
-        out, i, n = [], 0, len(text)
-        while i < n:
-            c = text[i]
-            if c == '%' and i + 1 < n and text[i + 1].isdigit():
-                k = int(text[i + 1]) - 1
-                li = lv.get(k)
-                v = arr[k] if 0 <= k < 9 and arr[k] is not None else (li[2] if li else 1)
-                out.append(format_number(li[0] if li else 'decimal', v))
-                i += 2
-            else:
-                out.append(c)
-                i += 1
-        return ''.join(out).strip()
+    def _label(index, levels, counters):
+        definition = levels[index]
+        if definition.number_format in ('bullet', 'none'):
+            return '', ()
+        unsupported = set()
+
+        def substitute(match):
+            referenced_index = int(match.group(1)) - 1
+            # A label may reference its own level or an ancestor, never a descendant.
+            referenced_level = levels.get(referenced_index)
+            if referenced_index > index or referenced_level is None:
+                return ''
+            number = counters.get(referenced_index, referenced_level.start)
+            number_format = 'decimal' if definition.legal else referenced_level.number_format
+            if number_format not in _NUMBER_FORMATS:
+                unsupported.add(number_format)
+            return format_number(number_format, number)
+
+        label = _LEVEL_REFERENCE.sub(substitute, definition.text).strip()
+        return label, tuple(sorted(unsupported))

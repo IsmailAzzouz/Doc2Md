@@ -4,6 +4,8 @@ import mimetypes
 import posixpath
 import re
 from contextlib import contextmanager
+from dataclasses import dataclass
+from typing import Optional
 from urllib.parse import quote
 
 from . import altchunk, omml
@@ -213,6 +215,17 @@ class _Field:
         self.instr, self.sep, self.kind, self.start, self.url = [], False, None, 0, None
 
 
+@dataclass(frozen=True)
+class _ListLevel:
+    """The current Markdown list item at one nesting depth."""
+
+    depth: int
+    marker_width: int
+    num_id: Optional[int]
+    marker_kind: str
+    number: int
+
+
 class Result:
     def __init__(self, markdown, images, report):
         self.markdown, self.images, self.report = markdown, images, report
@@ -228,7 +241,8 @@ class Converter:
         self.rels = pkg.rels(self.main)
         self.current_part = self.main
         self.styles = Styles(pkg.xml(pkg.related(self.main, 'styles')))
-        self.numbering = Numbering(pkg.xml(pkg.related(self.main, 'numbering')))
+        self.numbering = Numbering(pkg.xml(pkg.related(self.main, 'numbering')), self.styles)
+        self._numbering_warnings = set()
         self.media_dir, self.embed = media_dir, embed_images
         self.rep = Report()
         self.images = {}
@@ -396,8 +410,8 @@ class Converter:
         title = info.kind in ('title', 'tocheading') and not heading
         if numid is None:
             numid = info.numid
-            if ilvl is None and numid is not None:
-                ilvl = info.ilvl if info.ilvl is not None else self.numbering.style_level(info.numstyle)
+        if ilvl is None and numid:
+            ilvl = info.ilvl if info.ilvl is not None else self.numbering.style_level(info.numstyle or sid, numid)
         ilvl = ilvl or 0
 
         saved_pending, self.pending = self.pending, []
@@ -417,11 +431,17 @@ class Converter:
             out.extend(self.toc_new)
             self.toc_new = []
 
-        lv = None
+        numbering = None
         if numid and not info.toc:
-            lv = self.numbering.step(numid, ilvl)
-            if lv is not None and lv[3]:
-                lv = None
+            numbering = self.numbering.step(numid, ilvl)
+            if numbering is None:
+                self._warn_numbering('missing-numbering',
+                                     f'List {numid}, level {ilvl + 1} has no definition; paragraph text was retained.',
+                                     numid, ilvl, lost=True)
+            elif numbering.unsupported_formats:
+                formats = ', '.join(numbering.unsupported_formats)
+                self._warn_numbering('unsupported-numbering-format',
+                                     f'Number formats {formats} were approximated with decimal values.', numid, ilvl)
 
         # --- code (decided on untrimmed text so indentation survives)
         if items and all(m != RAW for _, m in items) and (
@@ -436,10 +456,12 @@ class Converter:
             out.append(['code', '', None])
         else:
             _trim(items)
-            self._text_block(p, items, bms, out, info, level, heading, title, lv, left, border)
+            self._text_block(p, items, bms, out, info, level, heading, title, numbering, left, border,
+                             allow_typed_list=numid is None)
         out.extend(extras)
 
-    def _text_block(self, p, items, bms, out, info, level, heading, title, lv, left, border):
+    def _text_block(self, p, items, bms, out, info, level, heading, title, numbering, left, border,
+                   *, allow_typed_list=True):
         toc_level = info.toc or (1 if self.toc_cur is not None and not heading else 0)
         if toc_level:
             if items and items[-1][1] != RAW:
@@ -464,8 +486,8 @@ class Converter:
 
         if heading:
             text = re.sub(r'\s+', ' ', render(items, ' ')).strip()
-            if lv is not None and not lv[0] and lv[2]:
-                text = lv[2] + ' ' + text
+            if numbering is not None and numbering.label:
+                text = esc(numbering.label) + ' ' + text
             lvl = min(level, 6)
             slug = self._unique_slug(slugify(plain_text(text)))
             self.headings.append((level, plain_text(text), slug))
@@ -488,16 +510,18 @@ class Converter:
             return
 
         typed = None
-        if lv is None and info.kind is None and items[0][1] != RAW:
+        if allow_typed_list and numbering is None and info.kind is None and items[0][1] != RAW:
             m = _TYPED_LI.match(items[0][0])
             if m:
                 items[0][0] = items[0][0][m.end():]
                 typed = (True, 0) if m.group(1) else (False, int(m.group(2)))
         text = fix_line_starts(render(items))
-        if lv is not None or typed:
-            bullet, number = (lv[0], lv[1]) if lv is not None else typed
-            key = left if left is not None else (lv[4] if lv is not None else 360)
-            self._li(out, text, bullet, number, key)
+        if numbering is not None and numbering.has_marker:
+            self._word_list_item(out, text, numbering)
+            return
+        if typed:
+            bullet, number = typed
+            self._li(out, text, bullet, number, left if left is not None else 360)
             return
         self.lstack = []
         if info.kind == 'quote':
@@ -508,17 +532,64 @@ class Converter:
         else:
             out.append(['p', text, None])
 
-    def _li(self, out, text, bullet, number, key):
-        st = self.lstack
-        if not st:
+    def _warn_numbering(self, code, message, num_id, level, *, lost=False):
+        """Report each affected definition once per document part, not once per item."""
+        key = (code, num_id, level, self.current_part)
+        if key in self._numbering_warnings:
+            return
+        self._numbering_warnings.add(key)
+        if lost:
+            self.rep.lost('list numbering')
+        else:
+            self.rep.part('list numbering')
+        self.rep.warn(code, message, part=self.current_part)
+
+    def _word_list_item(self, out, text, numbering):
+        bullet = numbering.is_bullet
+        delimiter = '.'
+        if not bullet:
+            decimal_labels = (f'{numbering.value}.', f'{numbering.value})')
+            if numbering.label in decimal_labels and 0 <= numbering.value <= 999999999:
+                delimiter = numbering.label[-1]
+            else:
+                # CommonMark only supports decimal list markers. Keep other labels
+                # visible as text inside bullet items instead of silently changing them.
+                text = fix_line_starts(esc(numbering.label)) + ' ' + text
+                bullet = True
+                self._warn_numbering('numbering-label-as-text',
+                                     'List labels unsupported by Markdown were retained as text in bullet items.',
+                                     numbering.num_id, numbering.level)
+        self._li(out, text, bullet, numbering.value, numbering.level,
+                 num_id=numbering.num_id, delimiter=delimiter)
+
+    def _li(self, out, text, bullet, number, depth, *, num_id=None, delimiter='.'):
+        stack = self.lstack
+        # Typed bullets use physical indentation; Word lists use their logical ilvl.
+        source_changed = bool(stack) and (stack[-1].num_id is None) != (num_id is None)
+        if source_changed:
+            stack.clear()
+        while stack and stack[-1].depth > depth:
+            stack.pop()
+        previous = stack.pop() if stack and stack[-1].depth == depth else None
+        indent = sum(level.marker_width for level in stack)
+        marker_kind = '-' if bullet else delimiter
+        separate = False
+        if previous is not None and previous.marker_kind == marker_kind:
+            different_list = previous.num_id != num_id
+            number_jumped = not bullet and number != previous.number + 1
+            separate = different_list or number_jumped
+        # Without a separator, Markdown merges adjacent lists and ignores restarts.
+        # A nested ordered list starting above/below 1 also needs a paragraph break.
+        nested_start = previous is None and bool(stack) and not bullet and number != 1
+        if source_changed or separate or nested_start:
+            out.append(['list_break', ' ' * indent + '<!-- -->', None])
+        if (not stack and previous is None) or separate:
             self.rep.ok('lists')
-        while st and st[-1][0] >= key:
-            st.pop()
-        indent = sum(w for _, w in st)
-        marker = '- ' if bullet else '%d. ' % number
-        st.append((key, len(marker)))
+        marker = '- ' if bullet else f'{number}{delimiter} '
+        stack.append(_ListLevel(depth, len(marker), num_id, marker_kind, number))
         body = text.replace('\n', '\n' + ' ' * (indent + len(marker)))
-        out.append(['li', ' ' * indent + marker + body, text])
+        cell_text = text if bullet else marker + text
+        out.append(['li', ' ' * indent + marker + body, cell_text])
 
     def _unique_slug(self, base):
         n = self.slugs.get(base, 0)
@@ -637,7 +708,7 @@ class Converter:
                     lines.append(_code_span(text.strip('\n')))
             elif k == 'table':
                 lines.append(aux)
-            elif k != 'hr':
+            elif k not in ('hr', 'list_break'):
                 lines.append(text)
         s = '<br>'.join(lines).replace('\\\n', '<br>').replace('\n', '<br>')
         return s.replace('|', '\\|')

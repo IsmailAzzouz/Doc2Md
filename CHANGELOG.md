@@ -6,6 +6,11 @@ minor releases may change APIs.
 
 ## [Unreleased]
 
+- Fix independent list counters, multilevel restart rules, start overrides and
+  replacement level definitions. Resolve numbering-style links and preserve
+  logical list nesting and adjacent list boundaries in rendered Markdown.
+- Preserve Roman, alphabetic and compound list labels as text with explicit
+  approximation warnings; report missing definitions and unsupported formats.
 - Preserve body-level equations and resolve footnote/endnote links and images
   against their own package relationships.
 - Preserve plain-text imports and readable HTML text from `altChunk`; show a
