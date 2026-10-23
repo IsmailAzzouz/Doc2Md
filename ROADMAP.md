@@ -13,7 +13,8 @@ can influence priorities.
 
 ## Later (`0.3.x` and beyond)
 
-- [ ] Better merged/nested tables, complex numbering and section handling.
+- [ ] Preserve nested table structure and richer cell content in both directions.
+- [ ] Expand complex numbering and section handling.
 - [ ] Improved mathematical expression coverage and graceful fallbacks.
 - [ ] Explicit conversion profiles (GitHub Markdown, CommonMark, etc.).
 - [ ] Structured warning/error codes and machine-readable conversion summaries.

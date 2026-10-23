@@ -43,6 +43,7 @@ python -m pytest
 doc2md report.docx                   # report.md and report_media/ if needed
 doc2md a.docx b.docx -o output/     # batch conversion
 doc2md report.docx --embed-images   # embed images as data URIs
+doc2md report.docx --table-format html  # preserve merged cells in HTML tables
 doc2md report.docx -o -             # Markdown on stdout
 doc2md report.docx --json           # coverage report on stderr
 # Supported feature overview:
@@ -55,6 +56,11 @@ Also works from source without installation of entry points:
 python doc2md.py report.docx
 ```
 
+Tables use Markdown pipe syntax by default. `--table-format html` preserves
+merged cells using HTML `rowspan` and `colspan` attributes inside the `.md`
+file. The destination must allow raw HTML. See [table limitations](LIMITATIONS.md#tables)
+for nested tables, footnotes and round-trip behavior.
+
 ### Markdown → Word
 
 ```bash
@@ -64,6 +70,19 @@ md2docx a.md b.md -o output/
 # Or from the checkout:
 python md2docx.py notes.md
 ```
+
+HTML `<table>` blocks in Markdown are converted automatically to native Word
+tables, including `rowspan`, `colspan`, header cells, formatting, links and
+images. No extra option is needed. This also reconstructs the merged-cell
+spans exported by `doc2md --table-format html`:
+
+```bash
+doc2md report.docx --table-format html -o exported.md
+md2docx exported.md -o reconstructed.docx
+```
+
+See [table limitations](LIMITATIONS.md#tables) for approximations and unsupported
+layout features.
 
 Relative image paths in Markdown are resolved against the Markdown file's
 directory. Remote images are linked rather than downloaded.
@@ -79,6 +98,9 @@ print(result.markdown)
 print(result.report.format())
 for warning in result.report.warnings:
     print(warning.code, warning.part, warning.message)
+
+# Optional: preserve merged-cell spans using HTML tables.
+result = convert_file("report.docx", table_format="html")
 
 word = convert("# Hello\n\nA paragraph.")
 with open("hello.docx", "wb") as file:

@@ -15,7 +15,8 @@ from mdit_py_plugins.front_matter import front_matter_plugin
 from doctomd.convert import slugify
 from doctomd.report import Report
 
-from . import images, latex, parts
+from . import html_tables, images, latex, parts, tables
+from .html_content import ContentReader
 
 B, I, S, U, SUP, SUB, CODE, MARK, LINK = 1, 2, 4, 8, 16, 32, 64, 128, 256
 _HTML_FMT = {'u': U, 'ins': U, 'sup': SUP, 'sub': SUB, 'mark': MARK, 'strong': B, 'b': B, 'em': I, 'i': I,
@@ -37,6 +38,8 @@ def attr(s):
 
 def _parser():
     md = MarkdownIt('commonmark', {'html': True}).enable(['table', 'strikethrough'])
+    md.block.ruler.before('html_block', 'html_table', html_tables.table_block,
+                         {'alt': ['paragraph', 'reference', 'blockquote']})
     md.use(front_matter_plugin).use(footnote_plugin).use(dollarmath_plugin, allow_space=True, double_inline=True)
     return md
 
@@ -155,7 +158,7 @@ class Builder:
             out.append(self.table(i, ctx))
             return match.get(i, i) + 1
         elif ty == 'html_block':
-            self.html_block(t, out)
+            self.html_block(t, out, ctx)
         elif ty in ('math_block', 'math_block_label'):
             out.append(self.math_block(t.content))
         elif ty == 'footnote_block_open':
@@ -225,8 +228,36 @@ class Builder:
         self.rep.ok('code blocks')
         return ''.join(out)
 
-    def html_block(self, t, out):
+    def html_block(self, t, out, ctx):
         c = t.content.strip()
+        if re.search(r'<table(?=[\s>])', c, re.IGNORECASE):
+            root = html_tables.read_fragment(c)
+            if any(True for _ in root.iter('table')):
+                if self.prefix:
+                    out.append('<w:p>%s</w:p>' % self.prefix)
+                    self.prefix = ''
+                reader = ContentReader()
+                for block in reader.read(root):
+                    if isinstance(block, tables.Paragraph):
+                        out.append(self._cell_paragraph(block))
+                        continue
+                    table, issues = html_tables.read_table(block)
+                    if not table.cells:
+                        fallback = ContentReader(in_cell=True)
+                        for paragraph in fallback.read(block):
+                            out.append(self._cell_paragraph(paragraph))
+                        self.rep.part('HTML table approximations')
+                        self.rep.warn('html-table-approximated',
+                                      'An HTML table without usable rows was retained as text.')
+                        continue
+                    for caption in block.findall('caption'):
+                        for paragraph in ContentReader(in_cell=True).read(caption):
+                            out.append(self._cell_paragraph(paragraph))
+                    if issues:
+                        self.rep.part('HTML table approximations')
+                        self.rep.warn('html-table-approximated', ' '.join(issues))
+                    out.append(self._write_table(table, ctx))
+                return
         if c.startswith('<!--'):
             return
         text = html.unescape(_PLAIN_TAGS.sub('', c)).strip()
@@ -297,48 +328,48 @@ class Builder:
     # ------------------------------------------------------------------ tables
     def table(self, i, ctx):
         toks, end = self.toks, self.match.get(i, i)
-        rows, row = [], None
+        cells, row, column, header_rows = [], -1, 0, set()
+        ncols = 0
         for k in range(i + 1, end):
             t = toks[k]
             if t.type == 'tr_open':
-                row = []
-                rows.append(row)
+                row += 1
+                column = 0
             elif t.type in ('th_open', 'td_open'):
                 style = t.attrGet('style') or ''
                 al = 'center' if 'center' in style else 'right' if 'right' in style else None
-                row.append((toks[k + 1], al, t.type == 'th_open'))
-        rows = [r for r in rows if r]
-        if not rows:
-            return ''
-        ncols = max(len(r) for r in rows)
-        weights = [6] * ncols
-        for r in rows:
-            for c, (inl, _, _) in enumerate(r):
-                n = sum(len(x.content) for x in inl.children if x.type in ('text', 'code_inline'))
-                weights[c] = max(weights[c], min(n, 50))
+                header = t.type == 'th_open'
+                cells.append(tables.Cell(row, column, [tables.Paragraph(toks[k + 1].children)],
+                                         alignment=al, header=header))
+                if header:
+                    header_rows.add(row)
+                column += 1
+                ncols = max(ncols, column)
+        return self._write_table(tables.Table(cells, row + 1, ncols, header_rows), ctx)
+
+    def _write_table(self, table, ctx):
         left = self.left(ctx)
-        total = self.text_twips - left
-        widths = [max(int(total * w / sum(weights)), 500) for w in weights]
-        out = ['<w:tbl><w:tblPr><w:tblStyle w:val="TableGrid"/><w:tblW w:w="%d" w:type="dxa"/>' % sum(widths)]
-        if left:
-            out.append('<w:tblInd w:w="%d" w:type="dxa"/>' % left)
-        out.append('<w:tblLayout w:type="fixed"/><w:tblLook w:val="04A0" w:firstRow="1" w:lastRow="0" w:firstColumn="0" w:lastColumn="0" '
-                   'w:noHBand="0" w:noVBand="1"/></w:tblPr><w:tblGrid>%s</w:tblGrid>' %
-                   ''.join('<w:gridCol w:w="%d"/>' % w for w in widths))
-        for r in rows:
-            header = r[0][2]
-            out.append('<w:tr><w:trPr><w:cantSplit/>%s</w:trPr>' % ('<w:tblHeader/>' if header else ''))
-            for c in range(ncols):
-                inl, al, hd = r[c] if c < len(r) else (None, None, header)
-                self.maxw = max(widths[c] * 635 - 216 * 635, 635 * 300)
-                runs = self.inline(inl.children) if inl is not None else ''
-                out.append('<w:tc><w:tcPr><w:tcW w:w="%d" w:type="dxa"/></w:tcPr><w:p>%s%s</w:p></w:tc>' % (
-                    widths[c], self.ppr(spacing='<w:spacing w:before="40" w:after="40" w:line="240" '
-                                                      'w:lineRule="auto"/>', jc=al), runs))
-            out.append('</w:tr>')
-        out.append('</w:tbl><w:p><w:pPr><w:spacing w:after="0" w:line="120" w:lineRule="exact"/></w:pPr></w:p>')
-        self.rep.ok('tables')
-        return ''.join(out)
+        xml = tables.write_table(table, self.text_twips - left, left, self._render_cell)
+        if xml:
+            self.rep.ok('tables')
+        return xml
+
+    def _render_cell(self, cell, width):
+        previous_width = self.maxw
+        self.maxw = max((width - 216) * 635, 300 * 635)
+        try:
+            return ''.join(self._cell_paragraph(paragraph, cell.alignment, B if cell.header else 0)
+                           for paragraph in cell.paragraphs) or '<w:p/>'
+        finally:
+            self.maxw = previous_width
+
+    def _cell_paragraph(self, paragraph, alignment=None, base=0):
+        if paragraph.preformatted:
+            base |= CODE
+        runs = self.inline(paragraph.children, base)
+        properties = self.ppr(jc=alignment, spacing='<w:spacing w:before="40" w:after="40" '
+                              'w:line="240" w:lineRule="auto"/>')
+        return f'<w:p>{properties}{runs}</w:p>'
 
     # ------------------------------------------------------------------ footnotes
     def footnote_block(self, i):
@@ -425,7 +456,7 @@ class Builder:
             elif ty == 'image':
                 out.append(self.image(c, fmt))
             elif ty == 'html_inline':
-                fmt = self.html_tag(c.content, fmt, out)
+                fmt = self.html_tag(c.content, fmt, out) | base
             elif ty == 'footnote_ref':
                 fid = (c.meta or {}).get('id', 0) + 1
                 out.append('<w:r><w:rPr><w:rStyle w:val="FootnoteReference"/></w:rPr><w:footnoteReference '

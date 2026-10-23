@@ -7,7 +7,7 @@ A round trip through Markdown will not reproduce the original page layout.
 | --- | --- | --- |
 | Headings, text formatting, links | Supported for common cases | Supported for common cases |
 | Lists | Independent counters, restarts and level overrides; see numbering details below | Common Markdown lists with predefined Word numbering styles |
-| Tables | Pipe-table output; merged cells flattened | Markdown tables; no general complex cell spans |
+| Tables | Pipe tables by default; optional HTML preserves merged-cell spans | Pipe tables and HTML tables, including row/column spans |
 | Images | Embedded images extracted or optionally inlined | Local/data URI raster images; remote URLs linked |
 | Equations | Common Word OMML converted to LaTeX | Supported LaTeX subset converted to OMML; other syntax may remain literal |
 | Footnotes and endnotes | Text, links and images use each note part's relationships | Markdown footnotes; endnote distinction is not restored |
@@ -19,8 +19,8 @@ A round trip through Markdown will not reproduce the original page layout.
 
 Known caveats:
 
-- Markdown cannot encode many Word presentation features; tables with merged
-  cells, floating shapes and text wrapping are approximated or discarded.
+- Markdown cannot encode many Word presentation features; merged cells in pipe
+  tables, floating shapes and text wrapping are approximated or discarded.
 - Chart data, annotations/comments, ink and drawing-only shapes are not reliably
   converted. Do not treat a successful exit status as lossless conversion.
 - Word math and Markdown LaTeX support overlapping **subsets**; arbitrary LaTeX,
@@ -47,6 +47,62 @@ Known caveats:
   documents without sandboxing.
 - The coverage percentage indicates recognized feature instances, not visual
   accuracy, accessibility compliance or semantic equivalence.
+
+## Tables
+
+The converter resolves the table grid, including `gridSpan`, vertical `vMerge`,
+legacy horizontal `hMerge`, and skipped columns before/after a row. A vertical
+continuation must occupy the same grid columns in the immediately preceding
+row. Invalid spans or unmatched merges retain readable cells and produce an
+`invalid-table-structure` warning. Nonempty continuation cells are retained
+once at the merge origin, with a `merged-cell-content-moved` warning.
+
+The default `--table-format markdown` produces pipe tables. Merged origins
+occupy their original grid position; the other covered positions are empty.
+Each affected table produces a `merged-table-flattened` warning. As before,
+the first row becomes the Markdown header, and simple single-cell boxes are
+unwrapped into document content.
+
+Use `--table-format html` (Python: `table_format="html"`) to preserve merged
+cells with `rowspan` and `colspan`. This option emits HTML for all tables,
+including single-cell boxes, and does not assume that the first row is a
+header. Text formatting, links, images and line breaks are retained. Paragraphs
+and lists within cells still use the existing flattened cell representation;
+equations retain LaTeX text. Nested tables remain readable text with a
+`nested-table-flattened` warning; preserving their structure is separate work.
+
+HTML mode requires a Markdown renderer that permits raw HTML. Tables containing
+footnote/endnote references fall back to pipe tables with an
+`html-table-fallback` warning, because those Markdown references would not be
+resolved inside raw HTML. The note content remains available.
+
+Markdown → DOCX recognizes HTML table blocks automatically and reconstructs
+native Word tables with `gridSpan` and `vMerge`. Cells support literal text,
+common inline formatting, paragraphs, line breaks, preformatted text, links,
+and local/data-URI images. Remote images use the existing link-only behavior.
+`th` cells are bold; leading header rows repeat across pages. Captions are
+retained as paragraphs before the table. Basic `align` and CSS `text-align`
+values are supported; general CSS, borders, widths, shading and page layout
+are not restored.
+
+HTML row groups are respected, including `rowspan="0"` through the remaining
+rows of its group. Spans extending past explicit rows are shortened; invalid
+span values default to 1; overlapping cells move to the next available grid
+position. These repairs produce `html-table-approximated` warnings. Nested
+tables and HTML lists within cells are retained as text/paragraphs with the
+same warning. An HTML table without usable rows falls back to readable text.
+This is a table importer, not a general HTML/CSS layout engine. Markdown syntax
+inside raw HTML cells stays literal, as it does in normal raw HTML blocks.
+
+Merged-cell spans now survive DOCX → HTML-in-Markdown → DOCX. Other layout and
+cell-block distinctions remain subject to the approximations above.
+
+Grid handling follows the OOXML definitions of
+[column spans](https://learn.microsoft.com/en-us/dotnet/api/documentformat.openxml.wordprocessing.gridspan)
+and [vertical merges](https://learn.microsoft.com/en-us/dotnet/api/documentformat.openxml.wordprocessing.verticalmerge).
+The output choices reflect the limits of [GFM pipe tables](https://github.github.com/gfm/#tables-extension-).
+HTML span parsing follows the [HTML table model](https://html.spec.whatwg.org/multipage/tables.html#processing-model-1),
+with the explicit repair behavior described above.
 
 ## List numbering
 
@@ -97,9 +153,18 @@ callers can inspect `result.report.warnings`. `--quiet` still suppresses reports
 | `missing-numbering` | A list instance or level could not be resolved; paragraph text was retained. |
 | `unsupported-numbering-format` | An unsupported numbering format was approximated using decimal values. |
 | `numbering-label-as-text` | A label Markdown cannot express was preserved as text inside a bullet item. |
+| `merged-table-flattened` | Merged cells were flattened into pipe-table grid positions. |
+| `invalid-table-structure` | Invalid grid values or unmatched merges were repaired without dropping cell text. |
+| `merged-cell-content-moved` | Content from merged continuation cells was retained at the merge origin. |
+| `nested-table-flattened` | A nested table was retained as readable text in its parent cell. |
+| `html-table-fallback` | HTML output fell back to a pipe table to preserve Markdown note references. |
 
 Numbering warnings are emitted once per affected instance and level in each
 document part, rather than repeated for every list item.
+
+Markdown → DOCX also reports `html-table-approximated` when an HTML table needs
+span repairs or contains nested tables/lists that are flattened. These warnings
+appear in `result.report.warnings` and the normal CLI report.
 
 These cases also count as approximated or unsupported features. Warnings are
 not yet exhaustive: other limitations may appear only in the feature counts,

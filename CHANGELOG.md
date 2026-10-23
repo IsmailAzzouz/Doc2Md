@@ -6,6 +6,14 @@ minor releases may change APIs.
 
 ## [Unreleased]
 
+- Convert HTML table blocks in Markdown back to native DOCX tables, including
+  row/column spans, header rows, inline formatting, links and images. Share the
+  Word table writer with pipe-table conversion and report malformed spans or
+  nested content that needs approximation.
+- Resolve merged table grids, vertical/horizontal merges and skipped columns
+  without silently dropping continuation-cell text. Add `--table-format html`
+  and the matching Python option to preserve row/column spans, with explicit
+  warnings for flattening, malformed merges and note-reference fallbacks.
 - Fix independent list counters, multilevel restart rules, start overrides and
   replacement level definitions. Resolve numbering-style links and preserve
   logical list nesting and adjacent list boundaries in rendered Markdown.

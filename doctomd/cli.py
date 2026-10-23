@@ -31,6 +31,8 @@ def main(argv=None):
     ap.add_argument('inputs', nargs='*', help='input file(s)')
     ap.add_argument('-o', '--output', help="output .md file (one input) or directory; '-' = stdout")
     ap.add_argument('--embed-images', action='store_true', help='inline images as base64 data URIs')
+    ap.add_argument('--table-format', choices=('markdown', 'html'), default='markdown',
+                    help='table output: markdown (default) or HTML with merged-cell spans')
     ap.add_argument('-q', '--quiet', action='store_true', help='no coverage report')
     ap.add_argument('--json', action='store_true', help='print coverage report as JSON on stderr')
     ap.add_argument('--features', action='store_true', help='list supported Word features and exit')
@@ -55,7 +57,7 @@ def main(argv=None):
             to_stdout = a.output == '-'
             out = None if to_stdout else _out_path(src, a.output, len(a.inputs) > 1)
             media = (os.path.splitext(os.path.basename(out))[0] if out else 'doc') + '_media'
-            res = convert_file(src, media, a.embed_images)
+            res = convert_file(src, media, a.embed_images, table_format=a.table_format)
         except (DocError, OSError) as e:
             print('error: %s: %s' % (src, e), file=sys.stderr)
             failed += 1

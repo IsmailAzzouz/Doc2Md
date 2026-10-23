@@ -1,4 +1,4 @@
-"""WordprocessingML tree -> Markdown (single pass, lxml only)."""
+"""WordprocessingML -> Markdown; optional HTML tables use markdown-it-py."""
 import base64
 import mimetypes
 import posixpath
@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from typing import Optional
 from urllib.parse import quote
 
-from . import altchunk, omml
+from . import altchunk, omml, tables
 from .numbering import Numbering
 from .package import DocError
 from .report import Report
@@ -33,13 +33,13 @@ _INLINE_PASS = frozenset((INS, MOVETO, SMARTTAG, CUSTOMXML, BDO, DIR, SDTCONTENT
 _ESC = re.compile(r'[\\`*\[\]~$]|<(?=[A-Za-z/!?])|&(?=#?\w+;)|(?<![0-9A-Za-z])_|_(?![0-9A-Za-z])')
 _LS = re.compile(r'(?m)^(?:(#{1,6}|[-+])(?=\s|$)|(>)|(\d{1,9})([.)])(?=\s|$)|([-=]{2,})[ \t]*$)')
 _ANCHOR_PH = re.compile(r'\(#\x00([^\x00]*)\x00\)')
+_HTML_TABLE_PH = re.compile(r'\x00table:(\d+)\x00')
 _PAGE_NO = re.compile(r'\t+\s*[0-9ivxlcIVXLC]+\s*$')
 _TYPED_LI = re.compile(r'^(?:([•·▪●○■□◦‣▫➢\-–*])|(\d{1,3})[.)])[ \t]+(?=\S)')
 _TOC_LEVELS = re.compile(r'\\o\s+"(\d)-(\d)"')
 _MD_IMG_TAG = re.compile(r'!\[[^\]]*\]\([^)]*\)|<[^>]+>')
 _MD_LINK = re.compile(r'\[([^\]]*)\]\([^)]*\)')
 _IND = W + 'ind'
-_ALIGN = {'center': 'c', 'right': 'r', 'end': 'r'}
 
 
 def _int(v, default):
@@ -232,7 +232,11 @@ class Result:
 
 
 class Converter:
-    def __init__(self, pkg, media_dir='media', embed_images=False):
+    def __init__(self, pkg, media_dir='media', embed_images=False, *, table_format='markdown'):
+        if table_format not in ('markdown', 'html'):
+            raise ValueError("table_format must be 'markdown' or 'html'")
+        self.table_format = table_format
+        self._html_tables = []
         self.pkg = pkg
         self.main = pkg.main
         self.root = pkg.xml(self.main)
@@ -272,11 +276,30 @@ class Converter:
         notes = self._footnotes()
         if notes:
             md += '\n\n' + notes
-        md = _ANCHOR_PH.sub(lambda m: '(#%s)' % self.bm.get(m.group(1), slugify(m.group(1))), md)
+        md = self._resolve_bookmarks(md)
+        md = self._render_html_tables(md)
         c = self.pkg.xml(self.pkg.related(self.main, 'comments'))
         if c is not None:
             self.rep.lost('comments', len(c))
         return Result(md.strip('\n') + '\n', self.images, self.rep)
+
+    def _resolve_bookmarks(self, markdown):
+        return _ANCHOR_PH.sub(lambda m: '(#%s)' % self.bm.get(m.group(1), slugify(m.group(1))), markdown)
+
+    def _render_html_tables(self, markdown):
+        if not self._html_tables:
+            return markdown
+        # Delay HTML rendering until all bookmarks (including later headings)
+        # are known. The normal Markdown path still needs only lxml.
+        from markdown_it import MarkdownIt
+        renderer = MarkdownIt('commonmark', {'html': True}).enable('strikethrough')
+
+        def render_table(match):
+            table, contents = self._html_tables[int(match.group(1))]
+            return tables.render_html(table, contents,
+                                      lambda text: renderer.renderInline(self._resolve_bookmarks(text)))
+
+        return _HTML_TABLE_PH.sub(render_table, markdown)
 
     def _notes(self, kind, tag):
         part = self.pkg.related(self.main, kind)
@@ -631,73 +654,56 @@ class Converter:
             self._degrade(tbl, out)
 
     def _table(self, tbl, out):
-        trs = [r for r in tbl if r.tag == TR]
-        if not trs:
+        table = tables.read_table(tbl)
+        if not table.rows or not table.columns:
             return
-        if len(trs) == 1:
-            tcs = [c for c in trs[0] if c.tag == TC]
-            if len(tcs) == 1:
-                self.rep.ok('single-cell boxes (unwrapped)')
-                self.lstack = []
-                out.extend(self.sub_blocks(tcs[0]))
-                return
-        rows, aligns = [], []
-        body_row = 1 if len(trs) > 1 else 0
-        for ri, tr in enumerate(trs):
-            cells = []
-            for tc in tr:
-                if tc.tag != TC:
-                    continue
-                span, cont, vm = 1, False, None
-                pr = tc.find(TCPR)
-                if pr is not None:
-                    gs = pr.find(GRIDSPAN)
-                    if gs is not None:
-                        span = max(1, _int(gs.get(VAL), 1))
-                    vm = pr.find(VMERGE)
-                    cont = vm is not None and vm.get(VAL) != 'restart'
-                if span > 1 or vm is not None:
-                    self.rep.part('merged table cells')
-                cells.append('' if cont else self._cell(tc))
-                cells.extend([''] * (span - 1))
-                if ri == body_row:
-                    aligns.append(self._align(tc))
-                    aligns.extend([''] * (span - 1))
-            rows.append(cells)
-        ncols = max(len(r) for r in rows)
-        if not ncols or not any(c for r in rows for c in r):
+        if (self.table_format == 'markdown' and len(table.rows) == table.columns == 1
+                and len(table.rows[0]) == 1 and not table.issues):
+            self.rep.ok('single-cell boxes (unwrapped)')
+            self.lstack = []
+            out.extend(self.sub_blocks(table.rows[0][0].elements[0]))
             return
-        for r in rows:
-            r.extend([''] * (ncols - len(r)))
-        aligns.extend([''] * (ncols - len(aligns)))
-        widths = []
-        for j in range(ncols):
-            w = max(len(r[j]) for r in rows)
-            widths.append(max(w, 3) if w <= 40 else 0)
-
-        def row(cells):
-            return '| ' + ' | '.join(c.ljust(widths[j]) for j, c in enumerate(cells)) + ' |'
-
-        sep = []
-        for j in range(ncols):
-            w = max(widths[j], 3)
-            a = aligns[j]
-            sep.append((':' + '-' * (w - 2) + ':') if a == 'c' else ('-' * (w - 1) + ':') if a == 'r' else '-' * w)
-        md = '\n'.join([row(rows[0]), '| ' + ' | '.join(sep) + ' |'] + [row(r) for r in rows[1:]])
-        flat = '<br>'.join(' · '.join(c for c in r if c) for r in rows)
+        # Convert every source cell in document order, before combining merges.
+        # This keeps numbering, note labels and image extraction in that order.
+        contents = {cell: self._cell(cell) for row in tbl.iterfind(TR) for cell in row.iterfind(TC)}
+        if table.issues:
+            self._warn_table('invalid-table-structure', ' '.join(table.issues))
+        if any(contents[element] for row in table.rows for cell in row for element in cell.elements[1:]):
+            self._warn_table('merged-cell-content-moved',
+                             'Text in merged continuation cells was retained at the merge origin.')
+        use_html = self.table_format == 'html'
+        if use_html and any(element.tag in (FOOTNOTEREF, ENDNOTEREF) for element in tbl.iter()):
+            # Markdown note references inside raw HTML would stop resolving.
+            use_html = False
+            self._warn_table('html-table-fallback',
+                             'Used a Markdown table to preserve footnote/endnote references.')
+        merged = table.merged_cells
+        if merged:
+            if use_html:
+                self.rep.ok('merged table cells', len(merged))
+            else:
+                self.rep.part('merged table cells', len(merged))
+                self.rep.warn('merged-table-flattened',
+                              'Merged cells were flattened because Markdown pipe tables cannot express spans.',
+                              part=self.current_part)
+        if use_html:
+            md = f'\x00table:{len(self._html_tables)}\x00'
+            self._html_tables.append((table, contents))
+        else:
+            md = tables.render_markdown(table, contents)
+        if not md:
+            return
         self.lstack = []
-        out.append(['table', md, flat])
+        out.append(['table', md, tables.flatten(table, contents)])
         self.rep.ok('tables')
 
-    @staticmethod
-    def _align(tc):
-        p = tc.find(P)
-        ppr = p.find(PPR) if p is not None else None
-        jc = ppr.find(JC) if ppr is not None else None
-        return _ALIGN.get(jc.get(VAL), '') if jc is not None else ''
+    def _warn_table(self, code, message):
+        self.rep.part('table structure')
+        self.rep.warn(code, message, part=self.current_part)
 
     def _cell(self, tc):
         lines = []
+        nested = False
         for k, text, aux in self.sub_blocks(tc):
             if k == 'h':
                 lines.append('**%s**' % text.lstrip('#').strip())
@@ -708,10 +714,12 @@ class Converter:
                     lines.append(_code_span(text.strip('\n')))
             elif k == 'table':
                 lines.append(aux)
+                nested = True
             elif k not in ('hr', 'list_break'):
                 lines.append(text)
-        s = '<br>'.join(lines).replace('\\\n', '<br>').replace('\n', '<br>')
-        return s.replace('|', '\\|')
+        if nested:
+            self._warn_table('nested-table-flattened', 'A nested table was retained as text inside its parent cell.')
+        return '<br>'.join(lines).replace('\\\n', '<br>').replace('\n', '<br>')
 
     # ------------------------------------------------------------------ inline
     def inline(self, el, items, ps, drop, in_link):
@@ -1153,5 +1161,5 @@ class Converter:
             return data, name
 
 
-def convert_package(pkg, media_dir='media', embed_images=False):
-    return Converter(pkg, media_dir, embed_images).run()
+def convert_package(pkg, media_dir='media', embed_images=False, *, table_format='markdown'):
+    return Converter(pkg, media_dir, embed_images, table_format=table_format).run()
