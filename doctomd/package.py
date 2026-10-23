@@ -8,6 +8,7 @@ _PARSER = etree.XMLParser(resolve_entities=False, no_network=True, huge_tree=Tru
                           remove_comments=True, remove_pis=True)
 _REL = '{http://schemas.openxmlformats.org/package/2006/relationships}Relationship'
 _OFFICE_DOC = '/officeDocument'
+_CONTENT_TYPES = '{http://schemas.openxmlformats.org/package/2006/content-types}'
 
 
 class DocError(Exception):
@@ -22,6 +23,7 @@ class Package:
             raise DocError('not a valid .docx (zip) file: %s' % e)
         self._names = {n.lower(): n for n in self.zip.namelist()}
         self._rels = {}
+        self._content_types = None
         self.main = self._find_main()
 
     # -- raw access
@@ -45,6 +47,26 @@ class Package:
             return etree.fromstring(data, _PARSER)
         except etree.XMLSyntaxError:
             return None
+
+    # -- content types
+    def content_type(self, part: str) -> str:
+        """Return a part's declared MIME type, preferring overrides to extensions."""
+        if self._content_types is None:
+            defaults, overrides = {}, {}
+            root = self.xml('[Content_Types].xml')
+            if root is not None:
+                for element in root:
+                    content_type = element.get('ContentType', '')
+                    if element.tag == _CONTENT_TYPES + 'Default':
+                        defaults[element.get('Extension', '').lower()] = content_type
+                    elif element.tag == _CONTENT_TYPES + 'Override':
+                        name = element.get('PartName', '').lstrip('/').lower()
+                        overrides[name] = content_type
+            self._content_types = defaults, overrides
+        defaults, overrides = self._content_types
+        name = part.lstrip('/').lower()
+        extension = posixpath.splitext(name)[1].lstrip('.')
+        return overrides.get(name, defaults.get(extension, ''))
 
     # -- relationships
     def rels(self, part):

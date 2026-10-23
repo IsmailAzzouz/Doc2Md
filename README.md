@@ -77,6 +77,8 @@ from mdtodoc import convert
 result = convert_file("report.docx")
 print(result.markdown)
 print(result.report.format())
+for warning in result.report.warnings:
+    print(warning.code, warning.part, warning.message)
 
 word = convert("# Hello\n\nA paragraph.")
 with open("hello.docx", "wb") as file:
@@ -93,6 +95,12 @@ conversion backend. Markdown → DOCX outputs `.docx` only. See
 Conversion is **best effort**, not reversible. The feature coverage report
 counts converted/approximated/unsupported feature instances, **not** a numerical
 measure of document quality.
+
+Reports also identify unsupported imports, unhandled equation constructs and
+missing note/link/image data with warning codes and source package paths.
+`doc2md report.docx --json` includes these in its `warnings` array. See
+[conversion warnings](LIMITATIONS.md#conversion-warnings) for the codes and
+remaining limitations.
 
 ## Releases
 

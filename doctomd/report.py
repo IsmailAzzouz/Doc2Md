@@ -1,5 +1,7 @@
 """Feature-coverage accounting: how much of what the document uses did we convert."""
 from collections import Counter
+from dataclasses import asdict, dataclass
+from typing import Optional
 
 PARTIAL_WEIGHT = 0.5
 
@@ -18,7 +20,8 @@ FEATURE_MATRIX = (
     ('ok', 'Table of contents (kept as linked list; rebuilt from headings when empty)'),
     ('ok', 'Images: embedded/linked, alt text, floating, VML; extracted or --embed-images base64'),
     ('ok', 'Footnotes and endnotes'),
-    ('ok', 'Equations (OMML -> LaTeX, inline and display)'),
+    ('part', 'Equations (common OMML -> LaTeX; unsupported constructs reported)'),
+    ('part', 'Imported content (altChunk): plain text; HTML text without formatting; other formats reported'),
     ('ok', 'Text boxes and shapes with text, content controls, checkboxes, tracked changes (accepted)'),
     ('ok', 'Hidden text skipped, NBSP normalized, symbols (Wingdings/Symbol) mapped'),
     ('part', 'SmartArt (text extracted), OLE objects (preview image only), EMF/WMF (PNG only with Pillow)'),
@@ -27,9 +30,23 @@ FEATURE_MATRIX = (
 )
 
 
+@dataclass(frozen=True)
+class ConversionWarning:
+    """A conversion limitation with a stable code and its source package part."""
+
+    code: str
+    message: str
+    part: Optional[str] = None
+
+
 class Report:
     def __init__(self):
         self.c = Counter()
+        self.warnings: list[ConversionWarning] = []
+
+    def warn(self, code: str, message: str, *, part: Optional[str] = None) -> None:
+        """Add detail for a feature also counted as approximated or unsupported."""
+        self.warnings.append(ConversionWarning(code, message, part))
 
     def ok(self, name, n=1):
         self.c[('ok', name)] += n
@@ -61,8 +78,12 @@ class Report:
             items = sorted(((n, v) for (s, n), v in self.c.items() if s == status), key=lambda x: -x[1])
             if items:
                 lines.append('  %-13s %s' % (label + ':', ', '.join('%s x%d' % (n, v) for n, v in items)))
+        for warning in self.warnings:
+            location = ' (%s)' % warning.part if warning.part else ''
+            lines.append('  warning [%s]%s: %s' % (warning.code, location, warning.message))
         return '\n'.join(lines)
 
     def as_dict(self):
         return {'percent': round(self.percent, 1), 'total': self.total,
-                'features': [{'status': s, 'name': n, 'count': v} for (s, n), v in sorted(self.c.items())]}
+                'features': [{'status': s, 'name': n, 'count': v} for (s, n), v in sorted(self.c.items())],
+                'warnings': [asdict(warning) for warning in self.warnings]}

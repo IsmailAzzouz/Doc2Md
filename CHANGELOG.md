@@ -6,6 +6,12 @@ minor releases may change APIs.
 
 ## [Unreleased]
 
+- Preserve body-level equations and resolve footnote/endnote links and images
+  against their own package relationships.
+- Preserve plain-text imports and readable HTML text from `altChunk`; show a
+  placeholder for unsupported or unreadable imports.
+- Add source-aware conversion warnings to text and JSON reports for import,
+  equation and missing-content losses, with synthetic DOCX regression tests.
 - Fix build with recent setuptools by removing the obsolete license classifier.
 - Simplify CI and releases to one Alpine container job each; remove Dependabot automation.
 

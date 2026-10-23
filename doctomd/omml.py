@@ -167,6 +167,29 @@ _H = {
     'borderBox': lambda e: r'\boxed{%s}' % _sub(e, 'e'),
 }
 
+# Structural containers have no notation of their own; their children carry it.
+_CONTAINERS = {'oMath', 'oMathPara', 'e', 'num', 'den', 'deg', 'sub', 'sup',
+               'fName', 'lim', 'mr', 't'}
+
+
+def unsupported_elements(element):
+    """Find math constructs that would otherwise be silently flattened by _node."""
+    unsupported = set()
+
+    def visit(node):
+        if not isinstance(node.tag, str) or not node.tag.startswith(M):
+            return
+        name = node.tag[len(M):]
+        if name.endswith('Pr'):
+            return
+        if name not in _H and name not in _CONTAINERS:
+            unsupported.add(name)
+        for child in node:
+            visit(child)
+
+    visit(element)
+    return sorted(unsupported)
+
 
 def _node(e):
     tag = e.tag

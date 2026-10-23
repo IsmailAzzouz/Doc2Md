@@ -3,9 +3,10 @@ import base64
 import mimetypes
 import posixpath
 import re
+from contextlib import contextmanager
 from urllib.parse import quote
 
-from . import omml
+from . import altchunk, omml
 from .numbering import Numbering
 from .package import DocError
 from .report import Report
@@ -225,14 +226,15 @@ class Converter:
         if self.root is None or self.root.tag != DOCUMENT:
             raise DocError('main document part is missing or not WordprocessingML (strict OOXML is unsupported)')
         self.rels = pkg.rels(self.main)
+        self.current_part = self.main
         self.styles = Styles(pkg.xml(pkg.related(self.main, 'styles')))
         self.numbering = Numbering(pkg.xml(pkg.related(self.main, 'numbering')))
         self.media_dir, self.embed = media_dir, embed_images
         self.rep = Report()
         self.images = {}
         self._img_src = {}
-        self.fn_el = self._notes('footnotes', FOOTNOTE)
-        self.en_el = self._notes('endnotes', ENDNOTE)
+        self.footnotes_part, self.fn_el = self._notes('footnotes', FOOTNOTE)
+        self.endnotes_part, self.en_el = self._notes('endnotes', ENDNOTE)
         self.fn_label, self.fn_queue = {}, []
         self.fields, self.suppress, self.links = [], 0, 0
         self.lstack, self.pending, self.toc_new, self.toc_cur, self.toc_all = [], [], [], None, []
@@ -263,8 +265,20 @@ class Converter:
         return Result(md.strip('\n') + '\n', self.images, self.rep)
 
     def _notes(self, kind, tag):
-        root = self.pkg.xml(self.pkg.related(self.main, kind))
-        return {} if root is None else {n.get(ID): n for n in root.iterfind(tag)}
+        part = self.pkg.related(self.main, kind)
+        root = self.pkg.xml(part)
+        notes = {} if root is None else {note.get(ID): note for note in root.iterfind(tag)}
+        return part, notes
+
+    @contextmanager
+    def _use_part(self, part):
+        """Resolve links and images against the part that owns their relationship IDs."""
+        previous_part, previous_relationships = self.current_part, self.rels
+        self.current_part, self.rels = part, self.pkg.rels(part)
+        try:
+            yield
+        finally:
+            self.current_part, self.rels = previous_part, previous_relationships
 
     # ------------------------------------------------------------------ blocks
     def blocks_of(self, parent, out):
@@ -274,6 +288,13 @@ class Converter:
                 self.paragraph(ch, out)
             elif t == TBL:
                 self.table(ch, out)
+            elif t in (M_OMATH, M_OMATHPARA):
+                self.lstack = []
+                equation = self._equation(ch, display=True)
+                if equation:
+                    out.append(['p', equation, None])
+            elif t == ALTCHUNK:
+                self._imported_content(ch, out)
             elif t == SDT:
                 c = ch.find(SDTCONTENT)
                 if c is not None:
@@ -284,9 +305,47 @@ class Converter:
     def sub_blocks(self, parent):
         saved, self.lstack = self.lstack, []
         out = []
-        self.blocks_of(parent, out)
-        self.lstack = saved
+        try:
+            self.blocks_of(parent, out)
+        finally:
+            self.lstack = saved
         return out
+
+    def _imported_content(self, element, out):
+        """Keep imported text in place and make every unsupported import visible."""
+        self.lstack = []
+        relationship = self.rels.get(element.get(R_ID))
+        if relationship is None:
+            self._unconverted_import(out, 'The import relationship is missing.')
+            return
+        target, external, relationship_type = relationship
+        if external or not relationship_type.lower().endswith('/afchunk'):
+            self._unconverted_import(out, 'The import must reference an internal alternative-format part.')
+            return
+        data = self.pkg.read(target)
+        if data is None:
+            self._unconverted_import(out, 'The imported part is missing: %s.' % target)
+            return
+        content_type = self.pkg.content_type(target) or mimetypes.guess_type(target)[0] or ''
+        try:
+            text, approximate = altchunk.extract_text(data, content_type)
+        except altchunk.ImportedContentError as error:
+            self._unconverted_import(out, str(error), part=target)
+            return
+        if text.strip():
+            out.append(['p', fix_line_starts(esc(text.strip())), None])
+        if approximate:
+            self.rep.part('imported HTML (text only)')
+            self.rep.warn('imported-html-as-text',
+                          'HTML text was preserved; formatting, link targets and embedded media were not.',
+                          part=target)
+        else:
+            self.rep.ok('imported plain text')
+
+    def _unconverted_import(self, out, reason, *, part=None):
+        out.append(['p', '*[Imported content could not be converted]*', None])
+        self.rep.lost('unconverted imported content')
+        self.rep.warn('unconverted-import', reason, part=part or self.current_part)
 
     def paragraph(self, p, out):
         saved = self.pending
@@ -305,6 +364,9 @@ class Converter:
         if text:
             out.append(['p', esc(text), None])
         self.rep.lost('blocks degraded to plain text')
+        self.rep.warn('plain-text-fallback',
+                      'An unexpected conversion error forced this block to plain text.',
+                      part=self.current_part)
 
     def _paragraph(self, p, out):
         sid = numid = ilvl = outline = left = None
@@ -605,17 +667,34 @@ class Converter:
             self.inline(c, items, ps, drop, in_link)
 
     def _h_omath(self, el, items, ps, drop, in_link):
-        s = omml.to_latex(el)
-        if s:
-            items.append(['$' + s + '$', RAW])
-            self.rep.ok('equations')
+        equation = self._equation(el)
+        if equation:
+            items.append([equation, RAW])
 
     def _h_omathpara(self, el, items, ps, drop, in_link):
-        parts = [omml.to_latex(m) for m in el.iter(M_OMATH)]
-        parts = [p for p in parts if p]
-        if parts:
-            self.pending.append(['p', '$$\n' + ' \\\\\n'.join(parts) + '\n$$', None])
+        equation = self._equation(el, display=True)
+        if equation:
+            self.pending.append(['p', equation, None])
+
+    def _equation(self, element, *, display=False):
+        """Share math rendering and loss accounting between inline and block content."""
+        equations = element.iter(M_OMATH) if element.tag == M_OMATHPARA else [element]
+        parts = [omml.to_latex(equation) for equation in equations]
+        latex = ' \\\\\n'.join(part for part in parts if part)
+        unsupported = omml.unsupported_elements(element)
+        if unsupported:
+            if latex:
+                self.rep.part('equations')
+            else:
+                self.rep.lost('equations')
+            self.rep.warn('unsupported-math',
+                          'Unsupported equation constructs: %s. Only convertible content was retained.' %
+                          ', '.join(unsupported), part=self.current_part)
+        elif latex:
             self.rep.ok('equations')
+        if not latex:
+            return '*[Equation could not be converted]*' if unsupported else ''
+        return '$$\n' + latex + '\n$$' if display else '$' + latex + '$'
 
     def _h_alt_inline(self, el, items, ps, drop, in_link):
         self._alt(el, items)
@@ -637,8 +716,13 @@ class Converter:
         url = None
         if rid:
             rel = self.rels.get(rid)
-            if rel:
+            if rel and rel[0]:
                 url = _url(rel[0]) + ('#' + anc if anc else '')
+            else:
+                self.rep.part('hyperlinks with missing targets')
+                self.rep.warn('missing-hyperlink-target',
+                              'Hyperlink %s has no target; its display text was retained.' % rid,
+                              part=self.current_part)
         elif anc:
             url = '#\x00' + anc + '\x00'
         inner = []
@@ -751,7 +835,6 @@ class Converter:
                     _add(items, ''.join(buf).translate(_TRANS), m)
                     buf = []
                 items.append(['[^%s]' % self._note_label(t == FOOTNOTEREF, c.get(ID)), RAW])
-                self.rep.ok('footnotes/endnotes')
             elif t == COMMENTREF:
                 pass
         if buf:
@@ -832,18 +915,27 @@ class Converter:
         return lab
 
     def _footnotes(self):
-        defs, i = [], 0
-        while i < len(self.fn_queue):
-            (is_fn, nid), lab = self.fn_queue[i]
-            i += 1
-            el = (self.fn_el if is_fn else self.en_el).get(nid)
-            if el is None:
-                continue
-            body = join_blocks(self.sub_blocks(el)).strip()
+        definitions = []
+        index = 0
+        while index < len(self.fn_queue):
+            (is_footnote, note_id), label = self.fn_queue[index]
+            index += 1
+            notes = self.fn_el if is_footnote else self.en_el
+            part = self.footnotes_part if is_footnote else self.endnotes_part
+            element = notes.get(note_id)
+            if element is None:
+                body = '*[Note content is missing]*'
+                self.rep.lost('footnotes/endnotes with missing content')
+                self.rep.warn('missing-note', 'Note %s has no readable definition.' % note_id,
+                              part=part or self.main)
+            else:
+                with self._use_part(part):
+                    body = join_blocks(self.sub_blocks(element)).strip()
+                self.rep.ok('footnotes/endnotes')
             lines = body.split('\n')
-            rest = ['    ' + l if l else '' for l in lines[1:]]
-            defs.append('[^%s]: %s' % (lab, '\n'.join([lines[0]] + rest)))
-        return '\n\n'.join(defs)
+            rest = ['    ' + line if line else '' for line in lines[1:]]
+            definitions.append('[^%s]: %s' % (label, '\n'.join([lines[0]] + rest)))
+        return '\n\n'.join(definitions)
 
     # ------------------------------------------------------------------ graphics
     def _alt(self, el, items):
@@ -936,11 +1028,15 @@ class Converter:
         rel = self.rels.get(rid) if rid else None
         if rel is None:
             self.rep.lost('images with missing data')
+            self.rep.warn('missing-image', 'Image relationship %s is missing.' % rid,
+                          part=self.current_part)
             return
         target, external, _ = rel
         src = _url(target) if external else self._save_image(target)
         if src is None:
             self.rep.lost('images with missing data')
+            self.rep.warn('missing-image', 'Image data is missing: %s.' % target,
+                          part=self.current_part)
             return
         alt = re.sub(r'[\[\]\r\n]+', ' ', alt or '').strip() or 'image'
         items.append(['![%s](%s)' % (alt, src), RAW])
