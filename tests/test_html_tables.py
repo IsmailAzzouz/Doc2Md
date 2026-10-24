@@ -238,13 +238,13 @@ def test_overlapping_spans_are_repaired_without_dropping_cells():
     assert 'Overlapping' in result.report.warnings[0].message
 
 
-def test_nested_tables_are_flattened_once_with_a_warning():
+def test_nested_tables_are_reconstructed_without_flattening():
     result = convert('<table><tr><td>Outer<table><tr><td>Inner A</td><td>Inner B</td></tr></table>'
                      'After</td></tr></table>')
-    assert len(document(result).findall('.//w:tbl', NS)) == 1
+    assert len(document(result).findall('.//w:tbl', NS)) == 2
     assert text(document(result)).count('Inner A') == 1
     assert 'After' in text(document(result))
-    assert 'nested' in result.report.warnings[0].message
+    assert not result.report.warnings
 
 
 def test_script_and_style_content_is_not_imported_as_cell_text():

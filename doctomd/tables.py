@@ -12,6 +12,14 @@ from .xmlns import JC, P, PPR, TC, TCPR, TR, VAL, W
 
 
 @dataclass
+class CellContent:
+    """Ordered converter blocks and their readable pipe-table fallback."""
+
+    blocks: list[list]
+    markdown: str
+
+
+@dataclass
 class Cell:
     column: int
     colspan: int
@@ -128,7 +136,7 @@ def read_table(element) -> Table:
 
 def cell_text(cell, contents):
     """Include text from continuation cells once, at the merged cell's origin."""
-    return '<br>'.join(contents[element] for element in cell.elements if contents[element])
+    return '<br>'.join(contents[element].markdown for element in cell.elements if contents[element].markdown)
 
 
 def flatten(table, contents):
@@ -172,7 +180,7 @@ def render_markdown(table, contents):
                      [render_row(row) for row in rows[1:]])
 
 
-def render_html(table, contents, render_inline):
+def render_html(table, contents, render_cell):
     """Emit spans and empty grid positions; never invent a header row."""
     if not table.rows or not table.columns:
         return ''
@@ -198,7 +206,15 @@ def render_html(table, contents, render_inline):
                 attributes += f' rowspan="{cell.rowspan}"'
             if cell.alignment:
                 attributes += f' align="{cell.alignment}"'
-            parts.append(f'<td{attributes}>{render_inline(cell_text(cell, contents))}</td>')
+            blocks = []
+            for element in cell.elements:
+                source = contents[element].blocks
+                if blocks and source:
+                    # Physical cells have independent list stacks. Do not let
+                    # Markdown merge their counters when retaining stray content.
+                    blocks.append(['list_break', '<!-- -->', None])
+                blocks.extend(source)
+            parts.append(f'<td{attributes}>{render_cell(blocks)}</td>')
             for covered in range(column, column + cell.colspan):
                 occupied_until[covered] = row_index + cell.rowspan
             column += cell.colspan

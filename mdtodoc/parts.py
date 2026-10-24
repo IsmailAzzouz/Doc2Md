@@ -1,4 +1,6 @@
 """Static / generated OOXML parts: styles, numbering, settings, package plumbing."""
+from dataclasses import dataclass
+from typing import Optional
 from xml.sax.saxutils import escape
 
 HEAD = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n'
@@ -78,25 +80,43 @@ def styles_xml():
             % grid)
 
 
+@dataclass(frozen=True)
+class NumberingInstance:
+    num_id: int
+    level: int
+    start: int
+    number_format: Optional[str] = None
+
+
+def _numbering_level(level, number_format, label):
+    indent = 720 * (level + 1)
+    font = ('<w:rPr><w:rFonts w:ascii="Calibri" w:hAnsi="Calibri" w:hint="default"/></w:rPr>'
+            if number_format == 'bullet' else '')
+    return (f'<w:lvl w:ilvl="{level}"><w:start w:val="1"/><w:numFmt w:val="{number_format}"/>'
+            f'<w:lvlText w:val="{label}"/><w:lvlJc w:val="left"/>'
+            f'<w:pPr><w:ind w:left="{indent}" w:hanging="360"/></w:pPr>{font}</w:lvl>')
+
+
 def numbering_xml(nums):
-    """abstract 0 = bullets, 1 = decimal-cycling; nums = [(numId, abstractId, ilvl, start)] (+ shared bullet numId 1)."""
+    """Shared list templates plus independent starts and optional format overrides."""
     bullets = ('•', '◦', '▪')
     fmts = ('decimal', 'lowerLetter', 'lowerRoman')
     lv_b, lv_d = [], []
     for i in range(9):
-        ind = '<w:pPr><w:ind w:left="%d" w:hanging="360"/></w:pPr>' % (720 * (i + 1))
-        lv_b.append('<w:lvl w:ilvl="%d"><w:start w:val="1"/><w:numFmt w:val="bullet"/><w:lvlText w:val="%s"/>'
-                    '<w:lvlJc w:val="left"/>%s<w:rPr><w:rFonts w:ascii="Calibri" w:hAnsi="Calibri" w:hint="default"/>'
-                    '</w:rPr></w:lvl>' % (i, bullets[i % 3], ind))
-        lv_d.append('<w:lvl w:ilvl="%d"><w:start w:val="1"/><w:numFmt w:val="%s"/><w:lvlText w:val="%%%d."/>'
-                    '<w:lvlJc w:val="left"/>%s</w:lvl>' % (i, fmts[i % 3], i + 1, ind))
+        lv_b.append(_numbering_level(i, 'bullet', bullets[i % 3]))
+        lv_d.append(_numbering_level(i, fmts[i % 3], f'%{i + 1}.'))
     out = [HEAD, '<w:numbering %s>' % NS,
            '<w:abstractNum w:abstractNumId="0"><w:multiLevelType w:val="hybridMultilevel"/>%s</w:abstractNum>' % ''.join(lv_b),
            '<w:abstractNum w:abstractNumId="1"><w:multiLevelType w:val="hybridMultilevel"/>%s</w:abstractNum>' % ''.join(lv_d),
            '<w:num w:numId="1"><w:abstractNumId w:val="0"/></w:num>']
-    for nid, ilvl, start in nums:
-        out.append('<w:num w:numId="%d"><w:abstractNumId w:val="1"/><w:lvlOverride w:ilvl="%d"><w:startOverride '
-                   'w:val="%d"/></w:lvlOverride></w:num>' % (nid, ilvl, start))
+    for instance in nums:
+        abstract = 0 if instance.number_format == 'bullet' else 1
+        replacement = ''
+        if instance.number_format and instance.number_format != 'bullet':
+            replacement = _numbering_level(instance.level, instance.number_format, f'%{instance.level + 1}.')
+        out.append(f'<w:num w:numId="{instance.num_id}"><w:abstractNumId w:val="{abstract}"/>'
+                   f'<w:lvlOverride w:ilvl="{instance.level}"><w:startOverride w:val="{instance.start}"/>'
+                   f'{replacement}</w:lvlOverride></w:num>')
     out.append('</w:numbering>')
     return ''.join(out)
 

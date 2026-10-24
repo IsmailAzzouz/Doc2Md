@@ -7,7 +7,7 @@ A round trip through Markdown will not reproduce the original page layout.
 | --- | --- | --- |
 | Headings, text formatting, links | Supported for common cases | Supported for common cases |
 | Lists | Independent counters, restarts and level overrides; see numbering details below | Common Markdown lists with predefined Word numbering styles |
-| Tables | Pipe tables by default; optional HTML preserves merged-cell spans | Pipe tables and HTML tables, including row/column spans |
+| Tables | Pipe tables by default; optional HTML preserves merges, nested tables and cell lists | Pipe tables and HTML tables, including nested tables, cell lists and row/column spans |
 | Images | Embedded images extracted or optionally inlined | Local/data URI raster images; remote URLs linked |
 | Equations | Common Word OMML converted to LaTeX | Supported LaTeX subset converted to OMML; other syntax may remain literal |
 | Footnotes and endnotes | Text, links and images use each note part's relationships | Markdown footnotes; endnote distinction is not restored |
@@ -66,20 +66,38 @@ unwrapped into document content.
 Use `--table-format html` (Python: `table_format="html"`) to preserve merged
 cells with `rowspan` and `colspan`. This option emits HTML for all tables,
 including single-cell boxes, and does not assume that the first row is a
-header. Text formatting, links, images and line breaks are retained. Paragraphs
-and lists within cells still use the existing flattened cell representation;
-equations retain LaTeX text. Nested tables remain readable text with a
-`nested-table-flattened` warning; preserving their structure is separate work.
+header. Text formatting, links, images and line breaks are retained. Nested
+tables remain inside their parent cells, with paragraphs before, between and
+after them kept in order. Numbered and bulleted lists become HTML lists with
+their starts, restarts and nesting preserved. Cells containing lists keep
+surrounding paragraphs and tables in order; simple text-only cells still use
+line breaks between paragraphs. Equations retain LaTeX text.
+Pipe-table output retains nested table content as readable text with a
+`nested-table-flattened` warning. Lists in pipe tables remain readable labels
+separated by line breaks, without automatic numbering or nesting.
+
+Word stores list items and their continuation paragraphs as siblings.
+In HTML cells, an unnumbered paragraph or table joins the preceding item only
+when its explicit indentation matches the item's content indentation. The
+item indent comes from its paragraph or numbering definition, defaulting to
+half an inch per level. Unindented content stays outside the list. Continuation
+indentation inherited only from a paragraph style is not resolved.
 
 HTML mode requires a Markdown renderer that permits raw HTML. Tables containing
 footnote/endnote references fall back to pipe tables with an
 `html-table-fallback` warning, because those Markdown references would not be
-resolved inside raw HTML. The note content remains available.
+resolved inside raw HTML. This fallback applies to the containing table and
+all its nested tables; note content remains available.
 
 Markdown → DOCX recognizes HTML table blocks automatically and reconstructs
 native Word tables with `gridSpan` and `vMerge`. Cells support literal text,
 common inline formatting, paragraphs, line breaks, preformatted text, links,
-and local/data-URI images. Remote images use the existing link-only behavior.
+local/data-URI images, nested tables, and ordered/bulleted lists at multiple
+levels. Paragraphs, lists and nested tables retain their order. List items may
+contain several paragraphs, preformatted text, sublists and tables. Inner
+table grids and images are sized to the available width of their parent cell.
+Remote images use the existing
+link-only behavior.
 `th` cells are bold; leading header rows repeat across pages. Captions are
 retained as paragraphs before the table. Basic `align` and CSS `text-align`
 values are supported; general CSS, borders, widths, shading and page layout
@@ -88,14 +106,22 @@ are not restored.
 HTML row groups are respected, including `rowspan="0"` through the remaining
 rows of its group. Spans extending past explicit rows are shortened; invalid
 span values default to 1; overlapping cells move to the next available grid
-position. These repairs produce `html-table-approximated` warnings. Nested
-tables and HTML lists within cells are retained as text/paragraphs with the
-same warning. An HTML table without usable rows falls back to readable text.
+position. These repairs produce `html-table-approximated` warnings.
+HTML `ol start` and `li value` become native Word numbering starts/restarts;
+separate lists have independent numbering. Ordered HTML lists use decimal
+markers at every depth. Non-decimal `ol type` values normalize to decimal;
+negative values become visible text labels in bullet items. Reversed lists
+retain their values using individual numbering restarts rather than a
+descending counter. Nesting beyond Word's nine levels is flattened at level
+nine. These approximations, invalid numbering attributes and malformed list
+content produce the same warning. An HTML table without usable rows falls
+back to readable text.
 This is a table importer, not a general HTML/CSS layout engine. Markdown syntax
 inside raw HTML cells stays literal, as it does in normal raw HTML blocks.
 
-Merged-cell spans now survive DOCX → HTML-in-Markdown → DOCX. Other layout and
-cell-block distinctions remain subject to the approximations above.
+Merged-cell spans, nested table hierarchy and supported cell lists survive
+DOCX → HTML-in-Markdown → DOCX. Other layout and cell-block distinctions remain
+subject to the approximations above.
 
 Grid handling follows the OOXML definitions of
 [column spans](https://learn.microsoft.com/en-us/dotnet/api/documentformat.openxml.wordprocessing.gridspan)
@@ -163,7 +189,7 @@ Numbering warnings are emitted once per affected instance and level in each
 document part, rather than repeated for every list item.
 
 Markdown → DOCX also reports `html-table-approximated` when an HTML table needs
-span repairs or contains nested tables/lists that are flattened. These warnings
+span repairs or list-numbering approximations. These warnings
 appear in `result.report.warnings` and the normal CLI report.
 
 These cases also count as approximated or unsupported features. Warnings are

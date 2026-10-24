@@ -6,10 +6,17 @@ minor releases may change APIs.
 
 ## [Unreleased]
 
+- Preserve numbered and bulleted lists inside HTML table cells in both
+  directions, including starts, restarts, nesting and item content. Import
+  HTML `ol start` and `li value` as native Word numbering; report unsupported
+  marker styles, negative values, reversed lists and excessive nesting.
+- Preserve nested table hierarchy in HTML-table export and DOCX import, keeping
+  surrounding paragraphs in order. Size inner tables and images to their
+  parent cells, and apply note-reference fallbacks to the complete table tree.
 - Convert HTML table blocks in Markdown back to native DOCX tables, including
   row/column spans, header rows, inline formatting, links and images. Share the
   Word table writer with pipe-table conversion and report malformed spans or
-  nested content that needs approximation.
+  content that needs approximation.
 - Resolve merged table grids, vertical/horizontal merges and skipped columns
   without silently dropping continuation-cell text. Add `--table-format html`
   and the matching Python option to preserve row/column spans, with explicit

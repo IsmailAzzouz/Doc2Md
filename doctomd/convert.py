@@ -224,6 +224,7 @@ class _ListLevel:
     num_id: Optional[int]
     marker_kind: str
     number: int
+    content_indent: int
 
 
 class Result:
@@ -237,6 +238,7 @@ class Converter:
             raise ValueError("table_format must be 'markdown' or 'html'")
         self.table_format = table_format
         self._html_tables = []
+        self._html_cell = False
         self.pkg = pkg
         self.main = pkg.main
         self.root = pkg.xml(self.main)
@@ -293,11 +295,36 @@ class Converter:
         # are known. The normal Markdown path still needs only lxml.
         from markdown_it import MarkdownIt
         renderer = MarkdownIt('commonmark', {'html': True}).enable('strikethrough')
+        rendered_tables = {}
+
+        def render_inline(text):
+            return renderer.renderInline(self._resolve_bookmarks(text))
+
+        def render_cell(blocks):
+            if any(block[0] == 'li' for block in blocks):
+                source = self._resolve_bookmarks(join_blocks(blocks))
+                source = _HTML_TABLE_PH.sub(render_table, source)
+                # Keep the enclosing raw HTML table in one Markdown block.
+                # Character references preserve newlines inside preformatted text.
+                return renderer.render(source).replace('\n', '&#10;')
+            if not any(block[0] == 'table' for block in blocks):
+                return render_inline(self._flatten_cell_blocks(blocks))
+            content = []
+            for block in blocks:
+                if block[0] == 'table':
+                    content.append(_HTML_TABLE_PH.sub(render_table, block[1]))
+                else:
+                    text = self._flatten_cell_blocks([block])
+                    if text:
+                        content.append('<p>' + render_inline(text) + '</p>')
+            return ''.join(content)
 
         def render_table(match):
-            table, contents = self._html_tables[int(match.group(1))]
-            return tables.render_html(table, contents,
-                                      lambda text: renderer.renderInline(self._resolve_bookmarks(text)))
+            index = int(match.group(1))
+            if index not in rendered_tables:
+                table, contents = self._html_tables[index]
+                rendered_tables[index] = tables.render_html(table, contents, render_cell)
+            return rendered_tables[index]
 
         return _HTML_TABLE_PH.sub(render_table, markdown)
 
@@ -467,21 +494,43 @@ class Converter:
                                      f'Number formats {formats} were approximated with decimal values.', numid, ilvl)
 
         # --- code (decided on untrimmed text so indentation survives)
-        if items and all(m != RAW for _, m in items) and (
+        cell_item = self._html_cell and numbering is not None and numbering.has_marker
+        if items and not cell_item and all(m != RAW for _, m in items) and (
                 info.kind == 'code' and not heading or
                 (any(m & F_CODE for _, m in items) and all(m & F_CODE or not t.strip() for t, m in items))):
             raw = ''.join(t for t, _ in items).lstrip('\n').rstrip()
-            self.lstack = []
-            out.append(['code', '\n'.join(l.rstrip() for l in raw.split('\n')), None])
+            self._code_block(out, '\n'.join(l.rstrip() for l in raw.split('\n')), left)
             self.rep.ok('code blocks')
-        elif not items and info.kind == 'code' and not heading and not info.toc:
-            self.lstack = []
-            out.append(['code', '', None])
+        elif not items and not cell_item and info.kind == 'code' and not heading and not info.toc:
+            self._code_block(out, '', left)
         else:
             _trim(items)
             self._text_block(p, items, bms, out, info, level, heading, title, numbering, left, border,
                              allow_typed_list=numid is None)
         out.extend(extras)
+
+    def _cell_list_indent(self, left):
+        """Attach explicitly indented cell content to its matching list item.
+
+        Word stores list items as sibling paragraphs. Matching the content
+        indent is the only structural hint for an unnumbered continuation.
+        Never infer membership for unindented content or outside HTML cells.
+        """
+        if not self._html_cell or left is None or left <= 0:
+            return None
+        for index in reversed(range(len(self.lstack))):
+            if self.lstack[index].content_indent == left:
+                del self.lstack[index + 1:]
+                return ' ' * sum(level.marker_width for level in self.lstack)
+        return None
+
+    def _code_block(self, out, text, left):
+        indent = self._cell_list_indent(left)
+        if indent is not None:
+            out.append(['list_code', indent + _fence(text).replace('\n', '\n' + indent), text])
+        else:
+            self.lstack = []
+            out.append(['code', text, None])
 
     def _text_block(self, p, items, bms, out, info, level, heading, title, numbering, left, border,
                    *, allow_typed_list=True):
@@ -501,7 +550,11 @@ class Converter:
                 self.rep.ok('toc entries')
             return
         if not items:
-            if border:
+            if self._html_cell and numbering and numbering.has_marker:
+                # CommonMark closes an empty item before a separated block.
+                # An invisible placeholder keeps a following table/code block inside.
+                self._word_list_item(out, '<!-- -->', numbering, left)
+            elif border:
                 self.lstack = []
                 out.append(['hr', '', None])
                 self.rep.ok('horizontal rules')
@@ -540,11 +593,15 @@ class Converter:
                 typed = (True, 0) if m.group(1) else (False, int(m.group(2)))
         text = fix_line_starts(render(items))
         if numbering is not None and numbering.has_marker:
-            self._word_list_item(out, text, numbering)
+            self._word_list_item(out, text, numbering, left)
             return
         if typed:
             bullet, number = typed
             self._li(out, text, bullet, number, left if left is not None else 360)
+            return
+        indent = self._cell_list_indent(left) if numbering is None else None
+        if indent is not None:
+            out.append(['list_p', indent + text.replace('\n', '\n' + indent), text])
             return
         self.lstack = []
         if info.kind == 'quote':
@@ -567,7 +624,7 @@ class Converter:
             self.rep.part('list numbering')
         self.rep.warn(code, message, part=self.current_part)
 
-    def _word_list_item(self, out, text, numbering):
+    def _word_list_item(self, out, text, numbering, left=None):
         bullet = numbering.is_bullet
         delimiter = '.'
         if not bullet:
@@ -583,9 +640,10 @@ class Converter:
                                      'List labels unsupported by Markdown were retained as text in bullet items.',
                                      numbering.num_id, numbering.level)
         self._li(out, text, bullet, numbering.value, numbering.level,
-                 num_id=numbering.num_id, delimiter=delimiter)
+                 num_id=numbering.num_id, delimiter=delimiter,
+                 content_indent=left if left is not None else numbering.content_indent)
 
-    def _li(self, out, text, bullet, number, depth, *, num_id=None, delimiter='.'):
+    def _li(self, out, text, bullet, number, depth, *, num_id=None, delimiter='.', content_indent=None):
         stack = self.lstack
         # Typed bullets use physical indentation; Word lists use their logical ilvl.
         source_changed = bool(stack) and (stack[-1].num_id is None) != (num_id is None)
@@ -609,7 +667,9 @@ class Converter:
         if (not stack and previous is None) or separate:
             self.rep.ok('lists')
         marker = '- ' if bullet else f'{number}{delimiter} '
-        stack.append(_ListLevel(depth, len(marker), num_id, marker_kind, number))
+        if content_indent is None:
+            content_indent = (depth + 1) * 720 if num_id is not None else depth
+        stack.append(_ListLevel(depth, len(marker), num_id, marker_kind, number, content_indent))
         body = text.replace('\n', '\n' + ' ' * (indent + len(marker)))
         cell_text = text if bullet else marker + text
         out.append(['li', ' ' * indent + marker + body, cell_text])
@@ -657,26 +717,34 @@ class Converter:
         table = tables.read_table(tbl)
         if not table.rows or not table.columns:
             return
+        table_indent = tbl.find('./' + W + 'tblPr/' + W + 'tblInd')
+        left = _int(table_indent.get(W + 'w'), None) if table_indent is not None else None
+        list_indent = self._cell_list_indent(left)
         if (self.table_format == 'markdown' and len(table.rows) == table.columns == 1
                 and len(table.rows[0]) == 1 and not table.issues):
             self.rep.ok('single-cell boxes (unwrapped)')
             self.lstack = []
             out.extend(self.sub_blocks(table.rows[0][0].elements[0]))
             return
-        # Convert every source cell in document order, before combining merges.
-        # This keeps numbering, note labels and image extraction in that order.
-        contents = {cell: self._cell(cell) for row in tbl.iterfind(TR) for cell in row.iterfind(TC)}
-        if table.issues:
-            self._warn_table('invalid-table-structure', ' '.join(table.issues))
-        if any(contents[element] for row in table.rows for cell in row for element in cell.elements[1:]):
-            self._warn_table('merged-cell-content-moved',
-                             'Text in merged continuation cells was retained at the merge origin.')
         use_html = self.table_format == 'html'
         if use_html and any(element.tag in (FOOTNOTEREF, ENDNOTEREF) for element in tbl.iter()):
             # Markdown note references inside raw HTML would stop resolving.
             use_html = False
             self._warn_table('html-table-fallback',
                              'Used a Markdown table to preserve footnote/endnote references.')
+        # Convert every source cell in document order, before combining merges.
+        # A note-reference fallback applies to the entire nested table tree.
+        previous_format = self.table_format
+        self.table_format = 'html' if use_html else 'markdown'
+        try:
+            contents = {cell: self._cell(cell, use_html) for row in tbl.iterfind(TR) for cell in row.iterfind(TC)}
+        finally:
+            self.table_format = previous_format
+        if table.issues:
+            self._warn_table('invalid-table-structure', ' '.join(table.issues))
+        if any(contents[element].markdown for row in table.rows for cell in row for element in cell.elements[1:]):
+            self._warn_table('merged-cell-content-moved',
+                             'Text in merged continuation cells was retained at the merge origin.')
         merged = table.merged_cells
         if merged:
             if use_html:
@@ -693,7 +761,10 @@ class Converter:
             md = tables.render_markdown(table, contents)
         if not md:
             return
-        self.lstack = []
+        if list_indent is not None and use_html:
+            md = list_indent + md
+        else:
+            self.lstack = []
         out.append(['table', md, tables.flatten(table, contents)])
         self.rep.ok('tables')
 
@@ -701,10 +772,25 @@ class Converter:
         self.rep.part('table structure')
         self.rep.warn(code, message, part=self.current_part)
 
-    def _cell(self, tc):
+    def _cell(self, tc, preserve_structure):
+        previous_cell, self._html_cell = self._html_cell, preserve_structure
+        try:
+            blocks = self.sub_blocks(tc)
+        finally:
+            self._html_cell = previous_cell
+        nested = sum(block[0] == 'table' for block in blocks)
+        if nested:
+            if preserve_structure:
+                self.rep.ok('nested tables', nested)
+            else:
+                self._warn_table('nested-table-flattened',
+                                 'A nested table was retained as text inside its parent cell.')
+        return tables.CellContent(blocks, self._flatten_cell_blocks(blocks))
+
+    @staticmethod
+    def _flatten_cell_blocks(blocks):
         lines = []
-        nested = False
-        for k, text, aux in self.sub_blocks(tc):
+        for k, text, aux in blocks:
             if k == 'h':
                 lines.append('**%s**' % text.lstrip('#').strip())
             elif k == 'li':
@@ -714,11 +800,8 @@ class Converter:
                     lines.append(_code_span(text.strip('\n')))
             elif k == 'table':
                 lines.append(aux)
-                nested = True
             elif k not in ('hr', 'list_break'):
                 lines.append(text)
-        if nested:
-            self._warn_table('nested-table-flattened', 'A nested table was retained as text inside its parent cell.')
         return '<br>'.join(lines).replace('\\\n', '<br>').replace('\n', '<br>')
 
     # ------------------------------------------------------------------ inline

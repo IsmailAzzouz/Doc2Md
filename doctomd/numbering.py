@@ -62,6 +62,7 @@ class _Level:
     restart_after: Optional[int]
     paragraph_style: Optional[str]
     legal: bool
+    content_indent: Optional[int]
 
 
 @dataclass(frozen=True)
@@ -74,6 +75,7 @@ class ListNumber:
     label: str
     number_format: str
     unsupported_formats: tuple[str, ...] = ()
+    content_indent: Optional[int] = None
 
     @property
     def is_bullet(self):
@@ -94,6 +96,7 @@ def _read_level(element, index):
     text = _value(element, 'lvlText', f'%{index + 1}.')
     if text_element is not None and text_element.get(W + 'null') in ('1', 'true', 'on'):
         text = ''
+    indent = element.find('./' + W + 'pPr/' + W + 'ind')
     return _Level(
         number_format=_value(element, 'numFmt', 'decimal'),
         text=text,
@@ -101,6 +104,8 @@ def _read_level(element, index):
         restart_after=restart - 1 if restart else None,
         paragraph_style=_value(element, 'pStyle'),
         legal=_enabled(element.find(W + 'isLgl')),
+        content_indent=_integer(indent.get(W + 'left', indent.get(W + 'start')), None)
+        if indent is not None else None,
     )
 
 
@@ -190,7 +195,8 @@ class Numbering:
             if level.restart_after == level_index:
                 counters.pop(index, None)
         label, unsupported = self._label(level_index, levels, counters)
-        return ListNumber(num_id, level_index, value, label, definition.number_format, unsupported)
+        return ListNumber(num_id, level_index, value, label, definition.number_format, unsupported,
+                          definition.content_indent)
 
     @staticmethod
     def _label(index, levels, counters):

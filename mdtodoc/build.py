@@ -16,7 +16,6 @@ from doctomd.convert import slugify
 from doctomd.report import Report
 
 from . import html_tables, images, latex, parts, tables
-from .html_content import ContentReader
 
 B, I, S, U, SUP, SUB, CODE, MARK, LINK = 1, 2, 4, 8, 16, 32, 64, 128, 256
 _HTML_FMT = {'u': U, 'ins': U, 'sup': SUP, 'sub': SUB, 'mark': MARK, 'strong': B, 'b': B, 'em': I, 'i': I,
@@ -64,6 +63,7 @@ class Builder:
         self.rels, self._rel_ids = [], {}
         self.media, self._media_ids, self.exts = {}, {}, set()
         self.nums, self.next_num = [], 2
+        self._deep_list_warned = False
         self.fn_defs, self.fn_used = [], set()
         self.in_note, self.prefix = False, ''
         self.bm_id, self.docpr_id = 0, 0
@@ -232,31 +232,21 @@ class Builder:
         c = t.content.strip()
         if re.search(r'<table(?=[\s>])', c, re.IGNORECASE):
             root = html_tables.read_fragment(c)
-            if any(True for _ in root.iter('table')):
+            if next(root.iter('table'), None) is not None:
                 if self.prefix:
                     out.append('<w:p>%s</w:p>' % self.prefix)
                     self.prefix = ''
-                reader = ContentReader()
-                for block in reader.read(root):
+                blocks, issues = html_tables.read_content(root)
+                if issues:
+                    self.rep.part('HTML table approximations')
+                    self.rep.warn('html-table-approximated', ' '.join(issues))
+                for block in blocks:
                     if isinstance(block, tables.Paragraph):
                         out.append(self._cell_paragraph(block))
-                        continue
-                    table, issues = html_tables.read_table(block)
-                    if not table.cells:
-                        fallback = ContentReader(in_cell=True)
-                        for paragraph in fallback.read(block):
-                            out.append(self._cell_paragraph(paragraph))
-                        self.rep.part('HTML table approximations')
-                        self.rep.warn('html-table-approximated',
-                                      'An HTML table without usable rows was retained as text.')
-                        continue
-                    for caption in block.findall('caption'):
-                        for paragraph in ContentReader(in_cell=True).read(caption):
-                            out.append(self._cell_paragraph(paragraph))
-                    if issues:
-                        self.rep.part('HTML table approximations')
-                        self.rep.warn('html-table-approximated', ' '.join(issues))
-                    out.append(self._write_table(table, ctx))
+                    elif isinstance(block, tables.ListBlock):
+                        out.append(self._cell_list(block, self.text_twips - self.left(ctx)))
+                    else:
+                        out.append(self._write_table(block, ctx))
                 return
         if c.startswith('<!--'):
             return
@@ -275,6 +265,16 @@ class Builder:
             return '<w:p>%s</w:p>' % self.run(tex.strip(), CODE)
 
     # ------------------------------------------------------------------ lists
+    def _list_numbering(self, ordered, level, start=1, *, independent=False):
+        """Use the same numbering allocation for document lists and HTML cell lists."""
+        if not ordered and not independent:
+            return 1
+        num_id = self.next_num
+        self.next_num += 1
+        number_format = ('decimal' if ordered else 'bullet') if independent else None
+        self.nums.append(parts.NumberingInstance(num_id, level, start, number_format))
+        return num_id
+
     def list_(self, i, ctx):
         toks, match = self.toks, self.match
         t = toks[i]
@@ -282,12 +282,7 @@ class Builder:
         ordered = t.type == 'ordered_list_open'
         lvl = ctx[0] + 1
         ilvl = min(lvl, 8)
-        if ordered:
-            numid = self.next_num
-            self.next_num += 1
-            self.nums.append((numid, ilvl, int(t.attrGet('start') or 1)))
-        else:
-            numid = 1
+        numid = self._list_numbering(ordered, ilvl, int(t.attrGet('start') or 1))
         self.rep.ok('lists')
         out, j = [], i + 1
         while j < end:
@@ -347,27 +342,78 @@ class Builder:
                 ncols = max(ncols, column)
         return self._write_table(tables.Table(cells, row + 1, ncols, header_rows), ctx)
 
-    def _write_table(self, table, ctx):
+    def _write_table(self, table, ctx, *, available_width=None):
         left = self.left(ctx)
-        xml = tables.write_table(table, self.text_twips - left, left, self._render_cell)
+        if available_width is None:
+            available_width = self.text_twips - left
+        xml = tables.write_table(table, available_width, left, self._render_cell)
         if xml:
             self.rep.ok('tables')
         return xml
 
     def _render_cell(self, cell, width):
         previous_width = self.maxw
-        self.maxw = max((width - 216) * 635, 300 * 635)
+        # TableGrid uses 108 twips of padding on each horizontal side.
+        content_width = max(width - 216, 1)
+        self.maxw = content_width * 635
         try:
-            return ''.join(self._cell_paragraph(paragraph, cell.alignment, B if cell.header else 0)
-                           for paragraph in cell.paragraphs) or '<w:p/>'
+            out = []
+            for block in cell.blocks:
+                if isinstance(block, tables.Paragraph):
+                    out.append(self._cell_paragraph(block, cell.alignment, B if cell.header else 0))
+                elif isinstance(block, tables.ListBlock):
+                    out.append(self._cell_list(block, content_width, cell.alignment, B if cell.header else 0))
+                else:
+                    out.append(self._write_table(block, (-1, 0), available_width=content_width))
+            return ''.join(out) or '<w:p/>'
         finally:
             self.maxw = previous_width
 
-    def _cell_paragraph(self, paragraph, alignment=None, base=0):
+    def _cell_list(self, block, width, alignment=None, base=0, level=0):
+        """Keep item blocks in order; only the first paragraph gets a marker."""
+        ilvl = min(level, 8)
+        if level > 8 and not self._deep_list_warned:
+            self._deep_list_warned = True
+            self.rep.part('HTML list depth')
+            self.rep.warn('html-table-approximated', 'List nesting beyond Word\'s nine levels was flattened.')
+        indent = (ilvl + 1) * 720
+        remaining_width = max(width - indent, 1)
+        previous_width = self.maxw
+        self.maxw = remaining_width * 635
+        out, num_id, expected = [], None, None
+        try:
+            for item in block.items:
+                if num_id is None or (block.ordered and item.value != expected):
+                    num_id = self._list_numbering(block.ordered, ilvl, item.value if block.ordered else 1,
+                                                  independent=True)
+                expected = item.value + 1 if block.ordered else None
+                has_paragraph = (bool(item.blocks) and isinstance(item.blocks[0], tables.Paragraph)
+                                 and not item.blocks[0].preformatted)
+                first = item.blocks[0] if has_paragraph else tables.Paragraph([])
+                out.append(self._cell_paragraph(first, alignment, base, num=(ilvl, num_id), indent=indent))
+                rest = item.blocks[1:] if has_paragraph else item.blocks
+                for child in rest:
+                    if isinstance(child, tables.Paragraph):
+                        out.append(self._cell_paragraph(child, alignment, base, indent=indent))
+                    elif isinstance(child, tables.ListBlock):
+                        out.append(self._cell_list(child, width, alignment, base, level + 1))
+                    else:
+                        out.append(self._write_table(child, (ilvl, 0), available_width=remaining_width))
+            self.rep.ok('lists')
+            return ''.join(out)
+        finally:
+            self.maxw = previous_width
+
+    def _cell_paragraph(self, paragraph, alignment=None, base=0, *, num=None, indent=0):
         if paragraph.preformatted:
             base |= CODE
         runs = self.inline(paragraph.children, base)
-        properties = self.ppr(jc=alignment, spacing='<w:spacing w:before="40" w:after="40" '
+        ind = None
+        if indent:
+            hanging = ' w:hanging="360"' if num else ''
+            ind = f'<w:ind w:left="{indent}"{hanging}/>'
+        properties = self.ppr(style='ListParagraph' if num else None, num=num, ind=ind,
+                              jc=alignment, spacing='<w:spacing w:before="40" w:after="40" '
                               'w:line="240" w:lineRule="auto"/>')
         return f'<w:p>{properties}{runs}</w:p>'
 

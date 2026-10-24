@@ -3,9 +3,10 @@ import re
 from html.parser import HTMLParser
 
 from lxml import html
+from markdown_it.token import Token
 
 from .html_content import ContentReader
-from .tables import Cell, Table
+from .tables import Cell, ListBlock, ListItem, Paragraph, Table
 
 
 _TABLE_START = re.compile(r'^<table(?=[\s>])', re.IGNORECASE)
@@ -55,6 +56,92 @@ def read_fragment(source):
     """Recover ordinary HTML syntax without fetching external resources."""
     parser = html.HTMLParser(no_network=True)
     return html.fragment_fromstring(source, create_parent='div', parser=parser)
+
+
+def read_content(element):
+    """Resolve tables and lists recursively, retaining surrounding paragraphs."""
+    reader = ContentReader()
+    source_blocks = reader.read(element)
+    blocks, issues = [], list(reader.issues)
+    for block in source_blocks:
+        if isinstance(block, Paragraph):
+            blocks.append(block)
+            continue
+        if block.tag in ('ol', 'ul'):
+            list_block, list_issues = read_list(block)
+            blocks.append(list_block)
+            issues.extend(list_issues)
+            continue
+        table, table_issues = read_table(block)
+        issues.extend(table_issues)
+        if table.cells:
+            for caption in block.findall('caption'):
+                caption_blocks, caption_issues = read_content(caption)
+                blocks.extend(caption_blocks)
+                issues.extend(caption_issues)
+            blocks.append(table)
+        else:
+            fallback, fallback_issues = read_content(block)
+            blocks.extend(fallback)
+            issues.extend(fallback_issues)
+            issues.append('An HTML table without usable rows was retained as text.')
+    return blocks, list(dict.fromkeys(issues))
+
+
+def _list_integer(element, name, default, issues):
+    raw = element.get(name)
+    if raw is None:
+        return default
+    try:
+        if re.fullmatch(r'\s*[+-]?[0-9]+\s*', raw):
+            return int(raw)
+    except ValueError:
+        pass
+    issues.append(f'Invalid list {name}; used {default}.')
+    return default
+
+
+def read_list(element):
+    """Resolve HTML starts and per-item values before writing Word numbering."""
+    stray_content = bool((element.text or '').strip()) or any(
+        (child.tail or '').strip() or (isinstance(child.tag, str) and child.tag != 'li')
+        for child in element)
+    if stray_content:
+        # Malformed lists used to pass through the text reader. Keep that
+        # recovery path instead of silently discarding text outside li nodes.
+        blocks, issues = read_content(element)
+        issues.append('HTML list content outside list items was retained in a bullet item.')
+        return ListBlock([ListItem(blocks)]), issues
+    ordered = element.tag == 'ol'
+    sources = element.findall('li')
+    items, issues = [], []
+    descending = ordered and 'reversed' in element.attrib
+    value = _list_integer(element, 'start', len(sources) if descending else 1, issues) if ordered else 1
+    if descending:
+        issues.append('Descending list values were retained with individual numbering restarts.')
+    if ordered and element.get('type', '1') != '1':
+        issues.append('Non-decimal HTML list markers were converted to decimal numbering.')
+    for source in sources:
+        blocks, content_issues = read_content(source)
+        issues.extend(content_issues)
+        if ordered:
+            value = _list_integer(source, 'value', value, issues)
+        items.append(ListItem(blocks, value if ordered else None))
+        value += -1 if descending else 1
+    if ordered and any(item.value < 0 for item in items):
+        # Word counters cannot start below zero. Retain these visible values
+        # using the same text-label fallback used by DOCX export.
+        issues.append('Negative list values were retained as text labels in bullet items.')
+        ordered = False
+        for item in items:
+            marker = Token('text', '', 0)
+            marker.content = f'{item.value}. '
+            if item.blocks and isinstance(item.blocks[0], Paragraph):
+                item.blocks[0].children.insert(0, marker)
+            else:
+                item.blocks.insert(0, Paragraph([marker]))
+            item.value = None
+    return ListBlock(items, ordered), list(dict.fromkeys(issues))
 
 
 def _span(element, name, issues):
@@ -132,10 +219,9 @@ def read_table(element):
                     issues.append('Overlapping HTML cells were moved to the next available grid position.')
                     while any(slot in occupied[index] for slot in range(column, column + colspan)):
                         column += 1
-                reader = ContentReader(in_cell=True)
-                paragraphs = reader.read(source)
-                issues.extend(reader.issues)
-                cells.append(Cell(row_offset + index, column, paragraphs, colspan, rowspan,
+                blocks, content_issues = read_content(source)
+                issues.extend(content_issues)
+                cells.append(Cell(row_offset + index, column, blocks, colspan, rowspan,
                                   _alignment(source, row), source.tag == 'th'))
                 for covered_row in range(index, index + rowspan):
                     occupied[covered_row].update(range(column, column + colspan))

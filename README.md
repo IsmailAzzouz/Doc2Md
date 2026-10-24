@@ -58,8 +58,11 @@ python doc2md.py report.docx
 
 Tables use Markdown pipe syntax by default. `--table-format html` preserves
 merged cells using HTML `rowspan` and `colspan` attributes inside the `.md`
-file. The destination must allow raw HTML. See [table limitations](LIMITATIONS.md#tables)
-for nested tables, footnotes and round-trip behavior.
+file. It also preserves nested tables, numbered and bulleted lists inside
+cells, and their surrounding paragraphs. List starts, restarts and nesting
+survive conversion in both directions.
+The destination must allow raw HTML. See [table limitations](LIMITATIONS.md#tables)
+for footnotes and round-trip behavior.
 
 ### Markdown → Word
 
@@ -72,9 +75,12 @@ python md2docx.py notes.md
 ```
 
 HTML `<table>` blocks in Markdown are converted automatically to native Word
-tables, including `rowspan`, `colspan`, header cells, formatting, links and
-images. No extra option is needed. This also reconstructs the merged-cell
-spans exported by `doc2md --table-format html`:
+tables, including nested tables, `rowspan`, `colspan`, header cells, formatting,
+links and images. Lists inside cells become native Word lists, including
+`ol start` and `li value` numbering. No extra option is needed. Inner tables
+and their images fit within the parent cell. This also reconstructs the
+table hierarchy and merged
+cells exported by `doc2md --table-format html`:
 
 ```bash
 doc2md report.docx --table-format html -o exported.md

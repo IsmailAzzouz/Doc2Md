@@ -1,6 +1,6 @@
 """A small table model and a shared OOXML writer for Markdown and HTML input."""
 from dataclasses import dataclass, field
-from typing import Optional
+from typing import Optional, Union
 
 from markdown_it.token import Token
 
@@ -12,10 +12,22 @@ class Paragraph:
 
 
 @dataclass
+class ListItem:
+    blocks: list[Union[Paragraph, 'Table', 'ListBlock']]
+    value: Optional[int] = None
+
+
+@dataclass
+class ListBlock:
+    items: list[ListItem]
+    ordered: bool = False
+
+
+@dataclass
 class Cell:
     row: int
     column: int
-    paragraphs: list[Paragraph]
+    blocks: list[Union[Paragraph, 'Table', ListBlock]]
     colspan: int = 1
     rowspan: int = 1
     alignment: Optional[str] = None
@@ -30,6 +42,28 @@ class Table:
     header_rows: set[int] = field(default_factory=set)
 
 
+def _text_length(blocks):
+    length = 0
+    for block in blocks:
+        if isinstance(block, Paragraph):
+            length += sum(len(token.content) for token in block.children if token.type in ('text', 'code_inline'))
+        elif isinstance(block, ListBlock):
+            length += sum(_text_length(item.blocks) for item in block.items)
+        else:
+            length += sum(_text_length(cell.blocks) for cell in block.cells)
+    return length
+
+
+def _column_widths(weights, available_width):
+    """Keep the grid within its container, even when nested cells are narrow."""
+    available_width = max(int(available_width), len(weights))
+    minimum = min(500, available_width // len(weights))
+    remaining = available_width - minimum * len(weights)
+    widths = [minimum + int(remaining * weight / sum(weights)) for weight in weights]
+    widths[-1] += available_width - sum(widths)
+    return widths
+
+
 def write_table(table, available_width, left, render_cell):
     """Write origins, vertical continuations and empty grid positions.
 
@@ -41,14 +75,13 @@ def write_table(table, available_width, left, render_cell):
     weights = [6] * table.columns
     placements = [{} for _ in range(table.rows)]
     for cell in table.cells:
-        length = sum(len(token.content) for paragraph in cell.paragraphs for token in paragraph.children
-                     if token.type in ('text', 'code_inline'))
+        length = _text_length(cell.blocks)
         weight = min(length, 50) / cell.colspan
         for column in range(cell.column, cell.column + cell.colspan):
             weights[column] = max(weights[column], weight)
         for row in range(cell.row, cell.row + cell.rowspan):
             placements[row][cell.column] = cell
-    widths = [max(int(available_width * weight / sum(weights)), 500) for weight in weights]
+    widths = _column_widths(weights, available_width)
     out = ['<w:tbl><w:tblPr><w:tblStyle w:val="TableGrid"/>'
            f'<w:tblW w:w="{sum(widths)}" w:type="dxa"/>']
     if left:

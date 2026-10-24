@@ -13,7 +13,8 @@ can influence priorities.
 
 ## Later (`0.3.x` and beyond)
 
-- [ ] Preserve nested table structure and richer cell content in both directions.
+- [x] Preserve automatic lists inside HTML table cells in both directions.
+- [ ] Preserve richer paragraph formatting inside table cells.
 - [ ] Expand complex numbering and section handling.
 - [ ] Improved mathematical expression coverage and graceful fallbacks.
 - [ ] Explicit conversion profiles (GitHub Markdown, CommonMark, etc.).

@@ -280,9 +280,10 @@ def test_numbered_content_is_converted_in_source_order_before_merging(convert_ta
     result = convert_table(xml, 'html', relationships={'numbering': ('numbering', 'numbering.xml', False)},
                            parts={'word/numbering.xml': numbering})
     cells = rendered(result.markdown).xpath('.//td')
-    assert cells[0].text_content() == '• 1. Origin• 3. Continued'
-    assert cells[1].text_content() == '• 2. Side'
-    assert cells[2].text_content() == '• 4. Last'
+    assert cells[0].xpath('./ol/li/text()') == ['Origin', 'Continued']
+    assert [int(item.get('start', '1')) for item in cells[0].findall('ol')] == [1, 3]
+    assert cells[1].xpath('./ol[@start="2"]/li/text()') == ['Side']
+    assert cells[2].xpath('./ol[@start="4"]/li/text()') == ['Last']
 
 
 def test_empty_spanned_cells_are_preserved_in_html(convert_table):
@@ -297,14 +298,14 @@ def test_single_cell_boxes_unwrap_only_in_default_mode(convert_table):
 
 
 @pytest.mark.parametrize('table_format', ['markdown', 'html'])
-def test_nested_table_flattening_is_explicit(convert_table, table_format):
+def test_nested_tables_follow_the_selected_output_format(convert_table, table_format):
     nested = table(row(cell('Nested | left'), cell('Nested right')))
     result = convert_table(table(row(cell(body=nested), cell('Outer'))), table_format)
     document = rendered(result.markdown)
-    assert len(document.xpath('.//table')) == 1
+    assert len(document.xpath('.//table')) == (2 if table_format == 'html' else 1)
     assert 'Nested | left' in document.text_content()
     assert 'Nested right' in document.text_content()
-    assert warning_codes(result) == ['nested-table-flattened']
+    assert warning_codes(result) == ([] if table_format == 'html' else ['nested-table-flattened'])
 
 
 def test_html_tables_with_footnotes_fall_back_to_markdown(convert_table):

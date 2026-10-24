@@ -21,10 +21,9 @@ def _token(kind, content='', *, tag='', nesting=0, attrs=None):
 
 
 class ContentReader:
-    """Yield paragraphs and top-level tables; nested cell tables are flattened."""
+    """Yield paragraphs, lists and tables in their original document order."""
 
-    def __init__(self, *, in_cell=False):
-        self.in_cell = in_cell
+    def __init__(self):
         self.blocks = []
         self.issues = []
         self.current = []
@@ -61,12 +60,9 @@ class ContentReader:
         tag = element.tag
         if not isinstance(tag, str) or tag in _SKIP:
             return
-        if tag == 'table':
+        if tag in ('table', 'ol', 'ul'):
             self._flush()
-            if self.in_cell:
-                self._flatten_table(element)
-            else:
-                self.blocks.append(element)
+            self.blocks.append(element)
             return
         if tag == 'pre':
             self._flush()
@@ -82,7 +78,7 @@ class ContentReader:
         if block:
             self._flush()
         if tag == 'li':
-            self.issues.append('HTML lists in cells were retained as paragraphs with bullet labels.')
+            self.issues.append('An HTML list item without a list container was retained as text.')
             self._text('• ')
         if tag == 'br':
             self.current.append(_token('hardbreak'))
@@ -106,15 +102,4 @@ class ContentReader:
         else:
             self._children(element)
         if block:
-            self._flush()
-
-    def _flatten_table(self, element):
-        self.issues.append('A nested HTML table was retained as text inside its parent cell.')
-        for row in element.iter('tr'):
-            if next(row.iterancestors('table'), None) is not element:
-                continue
-            for index, cell in enumerate(child for child in row if child.tag in ('td', 'th')):
-                if index:
-                    self._text(' · ')
-                self._children(cell)
             self._flush()
